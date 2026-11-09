@@ -1,0 +1,105 @@
+// strings — case conversion, padding and word helpers for PyHP.
+// Pure functions only: no module state, no side effects.
+
+function title(s) {
+    words = s.split(" ");
+    out = [];
+    foreach w in words {
+        if len(w) > 0 {
+            out.append(w.capitalize());
+        } else {
+            out.append(w);
+        }
+    }
+    return " ".join(out);
+}
+
+function camel(s) {
+    parts = s.replace("-", " ").replace("_", " ").split(" ");
+    out = "";
+    first = true;
+    foreach p in parts {
+        if len(p) == 0 { continue; }
+        if first {
+            out = out + p.lower();
+            first = false;
+        } else {
+            out = out + p.capitalize();
+        }
+    }
+    return out;
+}
+
+function snake(s) {
+    parts = s.replace("-", " ").split(" ");
+    keep = [];
+    foreach p in parts {
+        if len(p) > 0 { keep.append(p.lower()); }
+    }
+    return "_".join(keep);
+}
+
+function kebab(s) {
+    parts = s.replace("_", " ").split(" ");
+    keep = [];
+    foreach p in parts {
+        if len(p) > 0 { keep.append(p.lower()); }
+    }
+    return "-".join(keep);
+}
+
+function reverse(s) {
+    return s[::-1];
+}
+
+function isPalindrome(s) {
+    t = "";
+    foreach c in s.chars() {
+        if c.lower() != c.upper() {
+            t = t + c.lower();
+        }
+    }
+    return t == t[::-1];
+}
+
+function wordCount(s) {
+    return len(s.split());
+}
+
+function truncate(s, n) {
+    if len(s) <= n {
+        return s;
+    }
+    if n < 4 {
+        return s[0:n];
+    }
+    return s[0:n - 3] + "...";
+}
+
+function repeat(s, n) {
+    out = "";
+    i = 0;
+    while i < n {
+        out = out + s;
+        i++;
+    }
+    return out;
+}
+
+function padLeft(s, width) {
+    return repeat(" ", width - len(s)) + s;
+}
+
+function padRight(s, width) {
+    return s + repeat(" ", width - len(s));
+}
+
+function padCenter(s, width) {
+    total = width - len(s);
+    if total <= 0 {
+        return s;
+    }
+    left = int(total / 2);
+    right = total - left;
+    return repeat(" ", left) + s + repeat(" ", right);
+}

@@ -1,0 +1,12 @@
+{
+  "name": "pkg-demo",
+  "version": "1.0.0",
+  "description": "Demo project: shows pyhp pkg + require() in action.",
+  "main": "main.pyh",
+  "author": "PyHP contributors",
+  "license": "MIT",
+  "dependencies": {
+    "mathx": "1.0.0",
+    "texttable": "1.0.0"
+  }
+}

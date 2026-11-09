@@ -1,0 +1,63 @@
+# PyHP
+
+> PHP syntax, Python brains, C muscles. PyHP is a dynamically typed scripting
+> language with a PHP-family syntax (braces, semicolons, `echo`, `foreach`, no
+> `$` before variables), Python semantics (aliasing lists/dicts, slicing with
+> steps, comprehensions, lambdas & closures, classes with `super`, Python
+> truthiness) and C muscles (hex/binary literals, bitwise operators, optional
+> runtime-enforced static types, a malloc/free byte-buffer arena, file/env/exec
+> access).
+
+PyHP 0.2.0 runs on any PHP 8.0+ CLI with **two execution engines built from one
+front-end**: a tree-walking interpreter (`pyhp run`, `pyhp repl`) and a
+transpiler that emits standalone PHP 8 (`pyhp build`, `pyhp compile`). The
+29-case test suite runs every program through both engines and requires
+byte-identical output. Source of truth: https://github.com/Stevem100/pyhp
+
+## Files in this folder (ai/)
+
+- `pyhp-spec.json` — machine-readable language spec: version, syntax facts,
+  statement kinds, operator table, all 53 builtins with arities, the 15 string
+  methods, 11 list methods, 9 dict methods, module system and package manager
+  rules. Load this first if you need a compact representation.
+- `pyhp-qa.jsonl` — 58 chat-format training pairs (system/user/assistant).
+  Every code output in the answers was captured by actually executing the
+  snippet on the PyHP interpreter — nothing is hallucinated.
+- `pyhp-code.jsonl` — 26 instruction → solution pairs for code-generation
+  fine-tuning; every solution was parse-checked and executed, with its verified
+  output included as `verifiedOutput`.
+
+## Minimal mental model for code generation
+
+- File extension `.pyh`. Statements end with `;`; blocks use braces; comments
+  are `//`, `#`, `/* */` (`//` is NOT integer division; `/` is true division).
+- Variables: `name = value;` or typed `int x = 5;` (annotations: int, float,
+  string, bool, list, dict, var/any — enforced at runtime; float widens int).
+- Strings: `"..."` or `'...'`; f-strings: `f"hi {name}, sum={a + b}"`.
+- Loops: `while`, `do {...} while`, C-style `for (i = 0; i < n; i++)`,
+  `foreach x in xs`, `foreach k, v in xs`. Comprehensions:
+  `[x * 2 for x in xs if x > 1]`, `{k: v for k, v in d}`.
+- Lambdas: `double = lambda n: n * 2;` (params, colon, single expression).
+- Classes: `class Dog extends Animal { function __construct(n) { this.name = n; } }`,
+  `super(...)`, `__str__` for string conversion, `isinstance(obj, "Dog")`.
+- Errors: `try { throw ValueError("msg"); } catch (ValueError e) { e.message }`
+  finally {...}`; classes: Exception, TypeError, ValueError, KeyError,
+  IndexError, ZeroDivisionError, MemError, RuntimeError.
+- Dot-methods: strings (upper, split, join, find, ...), lists (append, pop,
+  sort, ...), dicts (get, has, merge, ...). Callables in dicts are dot-callable.
+- Modules: `m = require("./lib.pyh")` or `m = require("pkgname")` → dict of the
+  module's top-level functions/lambdas/classes; call as `m.fn(x)`, instantiate
+  classes as `m.Class(args)`. Cached per path. Packages: `pyhp pkg add mathx`
+  installs into `vendor/`; resolution: ./vendor → $PYHP_REGISTRY → install
+  registry (ships `strings`, `mathx`, `texttable`).
+- CLI: `pyhp run|build|compile|repl|pkg` (or `php bin/pyhp ...`); script args
+  arrive via `argv()`.
+
+## Common pitfalls (verified)
+
+- Dict keys are strings or ints only (no float/bool keys).
+- `isinstance(v, "list")` is false for primitives — use `type(v) == "list"`;
+  isinstance is for user/error classes.
+- `sorted(xs)` has no key parameter yet; write a small selection sort.
+- `echo` adds no newline and no separator; `print` adds both (space + newline).
+- In compiled mode, `require()` needs a literal string; keep modules stateless.

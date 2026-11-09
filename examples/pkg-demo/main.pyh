@@ -1,0 +1,13 @@
+// pkg-demo — install deps with:  pyhp pkg add mathx  &&  pyhp pkg add texttable
+// run with:                      pyhp run main.pyh   (or pyhp compile main.pyh)
+
+math = require("mathx");
+tt = require("texttable");
+
+rows = [];
+foreach p in math.factorize(2026) {
+    rows.append({"factor": p, "prime?": math.isPrime(p)});
+}
+print("2026 factors:");
+tt.printTable(rows);
+print("mean of 1..100 =", math.mean(range(1, 101)));

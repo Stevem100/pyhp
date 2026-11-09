@@ -15,7 +15,7 @@
 if (defined('PYHP_RUNTIME')) { return; }
 define('PYHP_RUNTIME', '1');
 
-const PYHP_VERSION = '0.1.0';
+const PYHP_VERSION = '0.2.0';
 
 /* =========================================================================
  * 1. Errors
@@ -182,6 +182,7 @@ class InterpFunc {
     public ?ClassDef $cls = null;
     public ?string $ret = null;
     public $native = null; // closure($env, $args) for builtin methods (e.g. Exception ctor)
+    public ?string $fileDir = null; // dir of the file this function was defined in (require resolution)
     public function __invoke(...$args) {
         return $this->interp->invokeFunc($this, $args);
     }
@@ -298,7 +299,12 @@ function pyhp_type_name($v): string {
     if ($v instanceof InterpInstance) return $v->cls->name;
     if (is_object($v)) {
         $c = get_class($v);
-        if (str_starts_with($c, 'PyHP_')) return substr($c, 5);
+        if (str_starts_with($c, 'PyHP_')) {
+            $n = substr($c, 5);
+            // module-compiled classes carry a namespace prefix: PyHP_m0_Circle -> Circle
+            if (preg_match('/^m\d+_(.+)$/', $n, $mm) === 1) return $mm[1];
+            return $n;
+        }
         return $c;
     }
     return 'unknown';
@@ -628,6 +634,11 @@ function pyhp_call_method($obj, string $name, array $args) {
         if (is_object($obj) && method_exists($obj, $name)) {
             return $obj->$name(...$args);
         }
+        // dict stored callables are reachable via dot-call (module tables etc.)
+        if ($obj instanceof PyDict && array_key_exists($name, $obj->d) && is_callable($obj->d[$name])
+            && !($obj->d[$name] instanceof PyList) && !($obj->d[$name] instanceof PyDict)) {
+            return pyhp_callfunc($obj->d[$name], $args, $name);
+        }
         if (is_string($obj)) {
             return pyhp_str_method($obj, $name, $args);
         }
@@ -637,6 +648,17 @@ function pyhp_call_method($obj, string $name, array $args) {
         throw new PyHPTypeError("{$name}(): " . pyhp_first_line($e->getMessage()));
     }
     throw new PyHPTypeError("'" . pyhp_type_name($obj) . "' object has no method '{$name}'");
+}
+
+/** Unified member READ used by transpiled code: instance props/methods,
+ *  dict keys (module tables), then error — mirroring the interpreter. */
+function pyhp_member($obj, string $name) {
+    if (is_object($obj)) {
+        if (property_exists($obj, $name)) return $obj->$name;
+        if (method_exists($obj, $name)) return fn(...$a) => pyhp_call_method($obj, $name, $a);
+        if ($obj instanceof PyDict && array_key_exists($name, $obj->d)) return $obj->d[$name];
+    }
+    throw new PyHPTypeError("'" . pyhp_type_name($obj) . "' object has no property '{$name}'");
 }
 
 function pyhp_first_line(string $s): string {
@@ -742,6 +764,45 @@ function pyhp_php_type(string $t): string {
  * ========================================================================= */
 
 function pyhp_set_argv(array $argv): void { $GLOBALS['__pyhp_argv'] = $argv; }
+
+/** Resolve a require() spec to a real .pyh file path.
+ *  - "./x.pyh", "../x.pyh", "/abs/x.pyh" -> relative to $baseDir (caller file)
+ *  - "name"                               -> ./vendor/name, then the registry
+ *  Returns the canonical path or null. */
+function pyhp_resolve_module(string $spec, string $baseDir): ?string {
+    $norm = str_replace('\\', '/', $spec);
+    $isPath = str_starts_with($norm, './') || str_starts_with($norm, '../') || str_starts_with($norm, '/')
+        || preg_match('#^[A-Za-z]:/#', $norm) === 1
+        || (str_contains($norm, '/') && str_ends_with($norm, '.pyh'));
+    if ($isPath) {
+        $p = $norm[0] === '/' ? $norm : rtrim($baseDir, '/\\') . '/' . $norm;
+        $rp = realpath($p);
+        return ($rp !== false && is_file($rp) && str_ends_with(strtolower($rp), '.pyh')) ? $rp : null;
+    }
+    if (!preg_match('/^[A-Za-z0-9_][A-Za-z0-9_.-]*$/', $spec)) return null; // not a package name
+    $roots = [ rtrim($baseDir, '/\\') . '/vendor/' . $spec ];
+    $reg = getenv('PYHP_REGISTRY');
+    if ($reg !== false && $reg !== '') $roots[] = rtrim($reg, '/\\') . '/' . $spec;
+    $roots[] = dirname(__DIR__) . '/registry/' . $spec;
+    foreach ($roots as $dir) {
+        if (!is_dir($dir)) continue;
+        $main = null;
+        $man = $dir . '/pyhp.json';
+        if (is_file($man)) {
+            $j = json_decode((string)file_get_contents($man), true);
+            if (is_array($j) && isset($j['main']) && is_string($j['main']) && $j['main'] !== '') $main = $j['main'];
+        }
+        $tries = [];
+        if ($main !== null) $tries[] = $main;
+        array_push($tries, "src/{$spec}.pyh", 'main.pyh', "{$spec}.pyh");
+        foreach ($tries as $t) {
+            if (str_contains($t, '..')) continue;
+            $rp = realpath($dir . '/' . $t);
+            if ($rp !== false && is_file($rp)) return $rp;
+        }
+    }
+    return null;
+}
 
 function pyhp_reg_errcheck(array $args, string $name, int $min, $max): void {
     $n = count($args);

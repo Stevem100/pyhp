@@ -28,10 +28,12 @@ PyHP {$v} — PHP syntax, Python brains, C muscles.
   pyhp build <script.pyh> -o out.php   transpile to a standalone PHP file
   pyhp compile <script.pyh> [args...]  transpile + run (fast path)
   pyhp repl                            start the interactive shell
+  pyhp pkg init|add|remove|list        manage packages (vendor/ + pyhp.json)
 
 Examples:
   php bin/pyhp run examples/01_hello.pyh
   php bin/pyhp build examples/01_hello.pyh -o /tmp/hello.php && php /tmp/hello.php
+  php bin/pyhp pkg add mathx
   php bin/pyhp repl
 
 TXT;
@@ -63,6 +65,7 @@ function pyhp_run_file(string $path, array $scriptArgs): int {
     try {
         $stmts = PyHPParser::parseSource($src);
         $interp = new PyHPInterpreter();
+        $interp->setMainFile($path);
         $interp->runProgram($stmts);
         return 0;
     } catch (PyHPExit $e) {
@@ -87,7 +90,9 @@ function pyhp_build_file(string $path, string $out): int {
     }
     try {
         $stmts = PyHPParser::parseSource(file_get_contents($path));
-        $php = (new PyHPTranspiler())->transpile($stmts, $out);
+        $t = new PyHPTranspiler();
+        $t->setSourceFile($path);
+        $php = $t->transpile($stmts, $out);
         file_put_contents($out, $php);
         echo "compiled {$path} -> {$out}\n";
         return 0;
@@ -100,7 +105,9 @@ function pyhp_compile_run(string $path, array $scriptArgs): int {
     $tmp = tempnam(sys_get_temp_dir(), 'pyhp_compiled_') . '.php';
     try {
         $stmts = PyHPParser::parseSource(file_get_contents($path));
-        $php = (new PyHPTranspiler())->transpile($stmts, $tmp);
+        $t = new PyHPTranspiler();
+        $t->setSourceFile($path);
+        $php = $t->transpile($stmts, $tmp);
         file_put_contents($tmp, $php);
     } catch (PyHPError $e) {
         @unlink($tmp);
@@ -213,6 +220,190 @@ function pyhp_balanced(string $s): bool {
 }
 
 /* ----------------------------------------------------------------- */
+/* package manager (pyhp pkg)                                        */
+/* ----------------------------------------------------------------- */
+
+function pyhp_pkg_registry_dirs(): array {
+    $dirs = [];
+    $cwd = getcwd();
+    if ($cwd !== false && is_dir($cwd . '/registry')) $dirs[] = $cwd . '/registry';
+    $env = getenv('PYHP_REGISTRY');
+    if ($env !== false && $env !== '' && is_dir($env)) $dirs[] = $env;
+    $home = dirname(__DIR__);
+    if (is_dir($home . '/registry')) $dirs[] = $home . '/registry';
+    return $dirs;
+}
+
+function pyhp_pkg_read_manifest(string $dir): array {
+    $man = $dir . '/pyhp.json';
+    if (!is_file($man)) return [];
+    $j = json_decode((string)file_get_contents($man), true);
+    return is_array($j) ? $j : [];
+}
+
+function pyhp_pkg_write_manifest(string $dir, array $m): void {
+    file_put_contents($dir . '/pyhp.json',
+        json_encode($m, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+}
+
+function pyhp_pkg_copy_dir(string $src, string $dst): void {
+    if (!is_dir($dst)) mkdir($dst, 0777, true);
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST);
+    foreach ($it as $item) {
+        $target = $dst . '/' . $it->getSubPathName();
+        if ($item->isDir()) { if (!is_dir($target)) mkdir($target, 0777, true); }
+        else copy($item->getPathname(), $target);
+    }
+}
+
+function pyhp_pkg_init(array $args): int {
+    $cwd = getcwd();
+    if ($cwd === false) { fwrite(STDERR, "pkg: cannot determine working directory\n"); return 1; }
+    if (is_file($cwd . '/pyhp.json')) {
+        fwrite(STDERR, "pkg: pyhp.json already exists in this directory\n");
+        return 1;
+    }
+    $name = $args[0] ?? basename($cwd);
+    $name = preg_replace('/[^A-Za-z0-9_.-]/', '-', $name);
+    $man = [
+        'name' => $name,
+        'version' => '0.1.0',
+        'description' => '',
+        'main' => "src/{$name}.pyh",
+        'author' => '',
+        'license' => 'MIT',
+        'dependencies' => new stdClass(),
+    ];
+    if (!is_dir($cwd . '/src')) mkdir($cwd . '/src', 0777, true);
+    $entry = $cwd . "/src/{$name}.pyh";
+    if (!is_file($entry)) {
+        file_put_contents($entry, "// {$name} — a PyHP package.\n// Functions defined at the top level are exported to require(\"{$name}\").\n\nfunction hello(who) {\n    return \"hello from {$name}, \" + who + \"!\";\n}\n");
+    }
+    pyhp_pkg_write_manifest($cwd, $man);
+    echo "initialized package {$name} in " . $cwd . "\n";
+    echo "  manifest : pyhp.json\n  entry    : src/{$name}.pyh\n";
+    return 0;
+}
+
+function pyhp_pkg_locate(string $name): ?string {
+    foreach (pyhp_pkg_registry_dirs() as $reg) {
+        $dir = $reg . '/' . $name;
+        if (is_dir($dir) && is_file($dir . '/pyhp.json')) return $dir;
+    }
+    return null;
+}
+
+function pyhp_pkg_add(array $args): int {
+    if (!isset($args[0])) { fwrite(STDERR, "usage: pyhp pkg add <name>[@version]\n"); return 1; }
+    $spec = $args[0];
+    $at = strpos($spec, '@');
+    $wantVer = $at === false ? null : substr($spec, $at + 1);
+    $name = $at === false ? $spec : substr($spec, 0, $at);
+    $cwd = getcwd();
+    if ($cwd === false || !is_file($cwd . '/pyhp.json')) {
+        fwrite(STDERR, "pkg: no pyhp.json here — run 'pyhp pkg init' first\n");
+        return 1;
+    }
+    $srcDir = pyhp_pkg_locate($name);
+    if ($srcDir === null) {
+        fwrite(STDERR, "pkg: package '{$name}' not found in registry\n");
+        fwrite(STDERR, "  searched: " . implode("\n           ", pyhp_pkg_registry_dirs() ?: ['(no registry found)']) . "\n");
+        return 1;
+    }
+    $meta = pyhp_pkg_read_manifest($srcDir);
+    $ver = $meta['version'] ?? '0.0.0';
+    if ($wantVer !== null && $wantVer !== $ver) {
+        fwrite(STDERR, "pkg: requested {$name}@{$wantVer} but registry has {$ver}\n");
+        return 1;
+    }
+    pyhp_pkg_copy_dir($srcDir, $cwd . '/vendor/' . $name);
+    $man = pyhp_pkg_read_manifest($cwd);
+    $deps = $man['dependencies'] ?? [];
+    $deps[$name] = $ver;
+    $man['dependencies'] = $deps;
+    pyhp_pkg_write_manifest($cwd, $man);
+    echo "added {$name}@{$ver} -> vendor/{$name}\n";
+    echo "use it:   m = require(\"{$name}\");\n";
+    return 0;
+}
+
+function pyhp_pkg_remove(array $args): int {
+    if (!isset($args[0])) { fwrite(STDERR, "usage: pyhp pkg remove <name>\n"); return 1; }
+    $name = $args[0];
+    $cwd = getcwd();
+    $man = pyhp_pkg_read_manifest($cwd);
+    $deps = $man['dependencies'] ?? [];
+    if (!isset($deps[$name])) {
+        fwrite(STDERR, "pkg: '{$name}' is not in pyhp.json dependencies\n");
+        return 1;
+    }
+    unset($deps[$name]);
+    $man['dependencies'] = $deps;
+    pyhp_pkg_write_manifest($cwd, $man);
+    $vend = $cwd . '/vendor/' . $name;
+    if (is_dir($vend)) {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($vend, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST);
+        foreach ($it as $item) { $item->isDir() ? rmdir($item->getPathname()) : unlink($item->getPathname()); }
+        @rmdir($vend);
+    }
+    echo "removed {$name}\n";
+    return 0;
+}
+
+function pyhp_pkg_list(): int {
+    $cwd = getcwd();
+    $man = pyhp_pkg_read_manifest($cwd);
+    $deps = $man['dependencies'] ?? [];
+    echo "project: " . ($man['name'] ?? basename($cwd)) . "@" . ($man['version'] ?? '?') . "\n";
+    if (count($deps) === 0) {
+        echo "dependencies: (none)\n";
+    } else {
+        echo "dependencies:\n";
+        foreach ($deps as $n => $v) {
+            $in = is_dir($cwd . '/vendor/' . $n) ? 'installed' : 'NOT installed (run: pyhp pkg add ' . $n . ')';
+            echo "  {$n}@{$v}  [{$in}]\n";
+        }
+    }
+    $regs = pyhp_pkg_registry_dirs();
+    if (count($regs) > 0) {
+        echo "registry packages available:\n";
+        foreach ($regs as $reg) {
+            foreach (scandir($reg) ?: [] as $d) {
+                if ($d[0] === '.') continue;
+                $m = pyhp_pkg_read_manifest($reg . '/' . $d);
+                if (isset($m['name'])) {
+                    echo "  {$m['name']}@" . ($m['version'] ?? '?') . "  — " . ($m['description'] ?? '') . "\n";
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+function pyhp_pkg_main(array $args): int {
+    $sub = $args[0] ?? 'help';
+    $rest = array_slice($args, 1);
+    switch ($sub) {
+        case 'init':   return pyhp_pkg_init($rest);
+        case 'add':    return pyhp_pkg_add($rest);
+        case 'install': return pyhp_pkg_add($rest);
+        case 'remove': case 'rm': return pyhp_pkg_remove($rest);
+        case 'list':   return pyhp_pkg_list();
+        default:
+            echo "usage: pyhp pkg <command>\n\n";
+            echo "  init            create pyhp.json + src/ stub in this folder\n";
+            echo "  add <name>      install a package from the registry into vendor/\n";
+            echo "  remove <name>   uninstall a package\n";
+            echo "  list            show dependencies and registry availability\n";
+            return 0;
+    }
+}
+
+/* ----------------------------------------------------------------- */
 /* main                                                              */
 /* ----------------------------------------------------------------- */
 
@@ -248,6 +439,9 @@ if ($cmd === 'build') {
 if ($cmd === 'compile') {
     if (!isset($argv[2])) { fwrite(STDERR, "usage: pyhp compile <script.pyh> [args...]\n"); exit(1); }
     exit(pyhp_compile_run($argv[2], array_slice($argv, 3)));
+}
+if ($cmd === 'pkg') {
+    exit(pyhp_pkg_main(array_slice($argv, 2)));
 }
 fwrite(STDERR, "unknown command '{$cmd}'\n\n");
 pyhp_usage();

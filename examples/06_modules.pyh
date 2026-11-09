@@ -1,0 +1,28 @@
+// PyHP — modules & packages: require(), vendor/ packages, pyhp pkg
+// Run:  php bin/pyhp run examples/06_modules.pyh
+//       php bin/pyhp compile examples/06_modules.pyh   (same output, fast path)
+
+text = require("./06_helper.pyh");
+
+// every top-level function/class of the module is reachable on the table
+echo text.shout("modules work the same in both engines"), "\n";
+
+words = text.topWords("the cat and the hat and the bat", 3);
+foreach pair in words {
+    echo "  " + pair[0] + " => " + str(pair[1]) + "\n";
+}
+
+// classes come through as factories
+counter = text.Counter();
+foreach w in ["a", "b", "c", "d"] {
+    counter.bump(len(w));
+}
+echo "count=" + str(counter.count) + ", limit=" + str(counter.limit) + "\n";
+echo str(counter), "\n";
+
+// require is cached: the same spec returns the same table
+echo "cached: " + str(text == require("./06_helper.pyh")) + "\n";
+
+// dot-call works on callables stored in plain dicts too
+ops = {"twice": lambda s: s + s};
+echo ops.twice("ha "), "\n";

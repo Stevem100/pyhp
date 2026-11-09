@@ -1,0 +1,170 @@
+// mathx — number theory and statistics helpers for PyHP.
+// Pure functions only: no module state, no side effects.
+
+function gcd(a, b) {
+    a = abs(int(a));
+    b = abs(int(b));
+    while b != 0 {
+        t = b;
+        b = a % b;
+        a = t;
+    }
+    return a;
+}
+
+function lcm(a, b) {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    return int(abs(int(a) * int(b)) / gcd(a, b));
+}
+
+function isPrime(n) {
+    n = int(n);
+    if n < 2 {
+        return false;
+    }
+    if n % 2 == 0 {
+        return n == 2;
+    }
+    d = 3;
+    while d * d <= n {
+        if n % d == 0 {
+            return false;
+        }
+        d += 2;
+    }
+    return true;
+}
+
+function primes(limit) {
+    out = [];
+    n = 2;
+    while n <= limit {
+        if isPrime(n) {
+            out.append(n);
+        }
+        n++;
+    }
+    return out;
+}
+
+function fib(n) {
+    seq = [];
+    a = 0;
+    b = 1;
+    i = 0;
+    while i < n {
+        seq.append(a);
+        t = a + b;
+        a = b;
+        b = t;
+        i++;
+    }
+    return seq;
+}
+
+function mean(xs) {
+    if len(xs) == 0 {
+        throw ValueError("mean() of empty list");
+    }
+    return sum(xs) / len(xs);
+}
+
+function median(xs) {
+    if len(xs) == 0 {
+        throw ValueError("median() of empty list");
+    }
+    s = sorted(xs);
+    n = len(s);
+    mid = int(n / 2);
+    if n % 2 == 1 {
+        return s[mid];
+    }
+    return (s[mid - 1] + s[mid]) / 2;
+}
+
+function variance(xs) {
+    if len(xs) < 2 {
+        throw ValueError("variance() needs at least 2 values");
+    }
+    m = mean(xs);
+    acc = 0;
+    foreach x in xs {
+        acc += (x - m) ** 2;
+    }
+    return acc / len(xs);
+}
+
+function stdDev(xs) {
+    return sqrt(variance(xs));
+}
+
+function clamp(v, lo, hi) {
+    if v < lo {
+        return lo;
+    }
+    if v > hi {
+        return hi;
+    }
+    return v;
+}
+
+function digitSum(n) {
+    n = abs(int(n));
+    total = 0;
+    while n > 0 {
+        total += n % 10;
+        n = int(n / 10);
+    }
+    return total;
+}
+
+function toBase(n, base) {
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    n = int(n);
+    base = int(base);
+    if base < 2 || base > 36 {
+        throw ValueError("toBase(): base must be 2..36");
+    }
+    if n == 0 {
+        return "0";
+    }
+    neg = n < 0;
+    if neg {
+        n = -n;
+    }
+    out = "";
+    while n > 0 {
+        out = digits[n % base] + out;
+        n = int(n / base);
+    }
+    if neg {
+        out = "-" + out;
+    }
+    return out;
+}
+
+function factorize(n) {
+    n = int(n);
+    factors = [];
+    if n < 2 {
+        return factors;
+    }
+    while n % 2 == 0 {
+        factors.append(2);
+        n = int(n / 2);
+    }
+    d = 3;
+    while d * d <= n {
+        while n % d == 0 {
+            factors.append(d);
+            n = int(n / d);
+        }
+        d += 2;
+    }
+    if n > 1 {
+        factors.append(n);
+    }
+    return factors;
+}

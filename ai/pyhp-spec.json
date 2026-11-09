@@ -1,0 +1,501 @@
+{
+    "language": "PyHP",
+    "version": "0.2.0",
+    "tagline": "PHP syntax, Python brains, C muscles.",
+    "fileExtension": ".pyh",
+    "runtime": "PHP 8.0+ CLI, no extensions",
+    "engines": {
+        "interpreter": "tree-walking AST evaluator (pyhp run / pyhp repl)",
+        "transpiler": "PyHP -> standalone PHP 8 (pyhp build / pyhp compile); both engines must produce byte-identical output"
+    },
+    "lexical": {
+        "comments": [
+            "// line",
+            "# line",
+            "/* block */"
+        ],
+        "statementTerminator": ";",
+        "blocks": "braces {} always",
+        "variables": "no $ prefix; declared by assignment or annotated decl",
+        "stringQuotes": [
+            "\"double\"",
+            "'single'"
+        ],
+        "fStrings": "f\"text {expr} more\" — full expressions inside {}",
+        "numberLiterals": [
+            "42",
+            "3.14",
+            "0xFF (hex)",
+            "0b1010 (binary)"
+        ]
+    },
+    "types": [
+        "int",
+        "float",
+        "string",
+        "bool",
+        "list",
+        "dict",
+        "null",
+        "user classes",
+        "error classes"
+    ],
+    "staticTyping": {
+        "annotations": [
+            "int",
+            "float",
+            "string",
+            "bool",
+            "list",
+            "dict",
+            "var",
+            "any"
+        ],
+        "enforcement": "runtime on every assignment; float widens int"
+    },
+    "operators": {
+        "arithmetic": [
+            "+",
+            "-",
+            "*",
+            "/",
+            "%",
+            "**"
+        ],
+        "comparison": [
+            "==",
+            "!=",
+            "<",
+            "<=",
+            ">",
+            ">="
+        ],
+        "logical": [
+            "and",
+            "or",
+            "not"
+        ],
+        "bitwise": [
+            "&",
+            "|",
+            "^",
+            "~",
+            "<<",
+            ">>"
+        ],
+        "membership": [
+            "in",
+            "not in"
+        ],
+        "ternary": "cond ? a : b",
+        "compoundAssign": [
+            "+=",
+            "-=",
+            "*=",
+            "/=",
+            "%=",
+            "**=",
+            "&=",
+            "|=",
+            "^=",
+            "<<=",
+            ">>="
+        ],
+        "increment": [
+            "++",
+            "--"
+        ],
+        "indexing": [
+            "xs[i] (negative ok)",
+            "xs[a:b]",
+            "xs[a:b:step] e.g. xs[::-1]"
+        ],
+        "notes": [
+            "// is a comment, not integer division; / is true division",
+            "+ concatenates strings, merges lists and dicts",
+            "string * int and list * int repeat"
+        ]
+    },
+    "statements": [
+        "if/elseif/else",
+        "while",
+        "do...while",
+        "for(init;cond;update)",
+        "foreach x in xs",
+        "foreach k, v in xs",
+        "break",
+        "continue",
+        "echo",
+        "function",
+        "return",
+        "class X extends Y",
+        "try/catch/finally",
+        "throw",
+        "varDecl (int x = 5;)",
+        "expression statement"
+    ],
+    "functions": {
+        "declaration": "function name(a, b = 5) { ... }",
+        "typed": "function name(int a) string { ... }",
+        "variadic": "function name(...xs) { ... }",
+        "lambda": "double = lambda n: n * 2;",
+        "firstClass": true
+    },
+    "classes": {
+        "declaration": "class Dog extends Animal { string name = \"\"; function __construct(n) { this.name = n; } }",
+        "constructor": "__construct or __init",
+        "stringHook": "__str__ or __toString",
+        "superCall": "super(...) and super.method(...)",
+        "errors": "built-in error classes behave like normal classes and can be extended"
+    },
+    "errorClasses": [
+        "Exception",
+        "TypeError",
+        "ValueError",
+        "KeyError",
+        "IndexError",
+        "ZeroDivisionError",
+        "MemError",
+        "RuntimeError"
+    ],
+    "modules": {
+        "form": "m = require(\"./lib.pyh\") | m = require(\"pkgname\")",
+        "exports": "top-level named functions, top-level lambdas, classes (as factories)",
+        "access": "m.fn(x), m.value, m[\"fn\"](x); classes: m.ClassName(args)",
+        "caching": "per resolved path; same table returned",
+        "resolution": [
+            "./vendor/<pkg>",
+            "$PYHP_REGISTRY/<pkg>",
+            "<install>/registry/<pkg>"
+        ],
+        "compiledMode": "spec must be a literal string; modules are inlined at build time",
+        "recommendation": "keep modules stateless (pure functions/classes)"
+    },
+    "packages": {
+        "manifest": "pyhp.json: {name, version, description, main, author, license, dependencies}",
+        "cli": [
+            "pyhp pkg init [name]",
+            "pyhp pkg add <name>[@ver]",
+            "pyhp pkg remove <name>",
+            "pyhp pkg list"
+        ],
+        "vendorDir": "vendor/"
+    },
+    "builtins": [
+        {
+            "name": "print",
+            "minArgs": 0,
+            "maxArgs": null
+        },
+        {
+            "name": "println",
+            "minArgs": 0,
+            "maxArgs": null
+        },
+        {
+            "name": "repr",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "len",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "range",
+            "minArgs": 1,
+            "maxArgs": 3
+        },
+        {
+            "name": "map",
+            "minArgs": 2,
+            "maxArgs": null
+        },
+        {
+            "name": "filter",
+            "minArgs": 2,
+            "maxArgs": 2
+        },
+        {
+            "name": "zip",
+            "minArgs": 1,
+            "maxArgs": null
+        },
+        {
+            "name": "enumerate",
+            "minArgs": 1,
+            "maxArgs": 2
+        },
+        {
+            "name": "sorted",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "reversed",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "sum",
+            "minArgs": 1,
+            "maxArgs": 2
+        },
+        {
+            "name": "any",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "all",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "keys",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "values",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "items",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "list",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "dict",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "abs",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "min",
+            "minArgs": 1,
+            "maxArgs": null
+        },
+        {
+            "name": "max",
+            "minArgs": 1,
+            "maxArgs": null
+        },
+        {
+            "name": "floor",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "ceil",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "round",
+            "minArgs": 1,
+            "maxArgs": 2
+        },
+        {
+            "name": "sqrt",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "pow",
+            "minArgs": 2,
+            "maxArgs": 2
+        },
+        {
+            "name": "rand",
+            "minArgs": 0,
+            "maxArgs": 2
+        },
+        {
+            "name": "int",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "float",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "str",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "bool",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "type",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "isinstance",
+            "minArgs": 2,
+            "maxArgs": 2
+        },
+        {
+            "name": "chr",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "ord",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "hex",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "bin",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "exec",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "system",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "file_read",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "file_write",
+            "minArgs": 2,
+            "maxArgs": 2
+        },
+        {
+            "name": "file_append",
+            "minArgs": 2,
+            "maxArgs": 2
+        },
+        {
+            "name": "file_exists",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "file_delete",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "mkdir",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "env",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "argv",
+            "minArgs": 0,
+            "maxArgs": 0
+        },
+        {
+            "name": "exit",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "time",
+            "minArgs": 0,
+            "maxArgs": 0
+        },
+        {
+            "name": "sleep",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "input",
+            "minArgs": 0,
+            "maxArgs": 1
+        },
+        {
+            "name": "malloc_arena",
+            "minArgs": 0,
+            "maxArgs": 0
+        }
+    ],
+    "stringMethods": [
+        "upper",
+        "lower",
+        "capitalize",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "split",
+        "replace",
+        "startswith",
+        "endswith",
+        "contains",
+        "find",
+        "count",
+        "join",
+        "chars"
+    ],
+    "listMethods": [
+        "__construct",
+        "getIterator",
+        "append",
+        "pop",
+        "extend",
+        "insert",
+        "remove",
+        "index",
+        "count",
+        "sort",
+        "reverse",
+        "clear",
+        "copy"
+    ],
+    "dictMethods": [
+        "__construct",
+        "keys",
+        "values",
+        "items",
+        "get",
+        "has",
+        "remove",
+        "clear",
+        "copy",
+        "merge"
+    ],
+    "repl": [
+        ":help",
+        ":vars",
+        ":quit / :exit / :q / Ctrl-D",
+        "bare expressions echo => repr(value)"
+    ]
+}

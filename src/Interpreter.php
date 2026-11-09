@@ -15,14 +15,13 @@ class PyHPInterpreter
     private array $classes = [];
     private int $depth = 0;
     private const MAX_DEPTH = 300;
+    private string $classNs = '';       // non-empty while loading a module ('m0\')
+    private array $modules = [];        // realpath => export PyDict (null while loading)
+    private array $fileDirs = [];       // stack of dirs of the file(s) being executed
 
     public function __construct() {
         require_once __DIR__ . '/runtime.php';
-        $this->global = new PyHPEnv(null);
-        foreach (array_keys(pyhp_builtins()) as $name) {
-            $fn = fn(...$args) => pyhp_call_builtin($name, $args);
-            $this->global->declare($name, $fn);
-        }
+        $this->global = $this->freshRootEnv();
         foreach (pyhp_error_class_map() as $errName => $phpClass) {
             $this->classes[$errName] = $this->makeErrorClass($errName);
         }
@@ -38,6 +37,113 @@ class PyHPInterpreter
     /* ================================================================ */
     /* program execution                                                */
     /* ================================================================ */
+
+    /** Track the file being executed so require("...") resolves relative to it. */
+    public function setMainFile(string $path): void {
+        $rp = realpath($path);
+        $this->fileDirs[] = ($rp !== false ? dirname($rp) : dirname($path));
+    }
+
+    private function currentDir(): string {
+        if (count($this->fileDirs) > 0) return $this->fileDirs[count($this->fileDirs) - 1];
+        $cwd = getcwd();
+        return $cwd === false ? '.' : $cwd;
+    }
+
+    /** Class registry key, namespaced while a module is loading. */
+    private function clsKey(string $n): string { return $this->classNs . $n; }
+
+    /** Find a class: module namespace first, then global (error classes). */
+    private function clsFind(string $n): ?ClassDef {
+        if ($this->classNs !== '' && isset($this->classes[$this->classNs . $n])) {
+            return $this->classes[$this->classNs . $n];
+        }
+        return $this->classes[$n] ?? null;
+    }
+
+    private function freshRootEnv(): PyHPEnv {
+        $env = new PyHPEnv(null);
+        foreach (array_keys(pyhp_builtins()) as $name) {
+            $fn = fn(...$args) => pyhp_call_builtin($name, $args);
+            $env->declare($name, $fn);
+        }
+        return $env;
+    }
+
+    /** Static scan of a module AST: which top-level names are exported?
+     *  Named function defs, top-level lambda assignments, and classes. */
+    private function moduleExportNames(array $stmts): array {
+        $funcs = [];
+        $classes = [];
+        foreach ($stmts as $s) {
+            if ($s['k'] === 'Func' && $s['name'] !== null) {
+                $funcs[] = $s['name'];
+            } elseif ($s['k'] === 'Expr' && $s['e']['k'] === 'Assign'
+                && $s['e']['target']['k'] === 'Var' && $s['e']['value']['k'] === 'Func') {
+                $funcs[] = $s['e']['target']['name'];
+            } elseif ($s['k'] === 'VarDecl' && $s['init'] !== null && $s['init']['k'] === 'Func') {
+                $funcs[] = $s['name'];
+            } elseif ($s['k'] === 'Class') {
+                $classes[] = $s['name'];
+            }
+        }
+        return [$funcs, $classes];
+    }
+
+    /** require("name" | "./path.pyh") — loads a module in an isolated scope
+     *  and returns its export table (a dict of functions and class factories). */
+    private function loadModule(array $args, int $line) {
+        if (count($args) !== 1) {
+            throw new PyHPTypeError("require() takes exactly 1 argument(s), got " . count($args));
+        }
+        $spec = $args[0];
+        if (!is_string($spec)) {
+            throw new PyHPTypeError("require() expects a module name or path string, got " . pyhp_type_name($spec));
+        }
+        $path = pyhp_resolve_module($spec, $this->currentDir());
+        if ($path === null) {
+            throw new PyHPError("line {$line}: ModuleNotFoundError: cannot find module '{$spec}' (looked in ./vendor and the registry)");
+        }
+        if (array_key_exists($path, $this->modules)) {
+            if ($this->modules[$path] === null) {
+                throw new PyHPSyntaxError("circular module dependency: '{$spec}'");
+            }
+            return $this->modules[$path];
+        }
+        $src = file_get_contents($path);
+        $stmts = PyHPParser::parseSource($src);
+        $id = 'm' . count($this->modules);
+        $this->modules[$path] = null; // reserve as cycle guard
+        [$funcNames, $classNames] = $this->moduleExportNames($stmts);
+
+        $savedNs = $this->classNs;
+        $this->classNs = $id . '\\';
+        $this->fileDirs[] = dirname($path);
+        $env = $this->freshRootEnv();
+        try {
+            $this->execStmts($stmts, $env);
+        } finally {
+            array_pop($this->fileDirs);
+            $this->classNs = $savedNs;
+        }
+
+        $exports = [];
+        foreach ($funcNames as $n) {
+            if (array_key_exists($n, $env->vars) && $env->vars[$n] instanceof InterpFunc
+                && $env->vars[$n]->cls === null) {
+                $exports[$n] = $env->vars[$n];
+            }
+        }
+        foreach ($classNames as $n) {
+            $cls = $this->classes[$id . '\\' . $n] ?? null;
+            if ($cls !== null) {
+                $exports[$n] = fn(...$a) => $this->instantiate($cls, $a);
+            }
+        }
+        $table = new PyDict($exports);
+        $this->modules[$path] = $table;
+        return $table;
+    }
 
     /** Execute statements; if the program is a single bare expression,
      *  return its value (used by the REPL). */
@@ -85,6 +191,7 @@ class PyHPInterpreter
                 $f->env = $env;
                 $f->interp = $this;
                 $f->cls = null;
+                $f->fileDir = $this->currentDir();
                 if ($s['name'] !== null) {
                     $env->assign($s['name'], $f);
                 }
@@ -279,16 +386,22 @@ class PyHPInterpreter
 
     private function declareClass(array $s): void {
         $name = $s['name'];
-        if (isset($this->classes[$name])) {
+        $key = $this->clsKey($name);
+        if (isset($this->classes[$key])) {
             throw new PyHPSyntaxError("line {$s['line']}: cannot redefine class '{$name}'");
         }
         $cls = new ClassDef();
         $cls->name = $name;
         if ($s['ext'] !== null) {
-            if (!isset($this->classes[$s['ext']])) {
+            $parent = $this->clsFind($s['ext']);
+            if ($parent === null) {
                 throw new PyHPSyntaxError("line {$s['line']}: unknown parent class '{$s['ext']}'");
             }
-            $cls->parent = $this->classes[$s['ext']];
+            if ($this->classNs !== '' && !isset($this->classes[$this->classNs . $s['ext']])
+                && !array_key_exists($s['ext'], pyhp_error_class_map())) {
+                throw new PyHPSyntaxError("line {$s['line']}: module classes cannot extend classes from other files");
+            }
+            $cls->parent = $parent;
         }
         foreach ($s['members'] as $m) {
             if ($m['k'] === 'Func') {
@@ -300,12 +413,13 @@ class PyHPInterpreter
                 $f->env = $this->global;
                 $f->interp = $this;
                 $f->cls = $cls;
+                $f->fileDir = $this->currentDir();
                 $cls->methods[$m['name']] = $f;
             } elseif ($m['k'] === 'VarDecl') {
                 $cls->propStmts[] = $m;
             }
         }
-        $this->classes[$name] = $cls;
+        $this->classes[$key] = $cls;
     }
 
     private function findMethod(ClassDef $cls, string $name): ?InterpFunc {
@@ -361,6 +475,8 @@ class PyHPInterpreter
             $this->depth--;
             throw new PyHPRuntimeError("stack overflow: recursion deeper than " . self::MAX_DEPTH . " calls");
         }
+        $pushedDir = false;
+        if ($f->fileDir !== null) { $this->fileDirs[] = $f->fileDir; $pushedDir = true; }
         try {
             $env = new PyHPEnv($f->env);
             if ($thisInst !== null) $env->declare('this', $thisInst);
@@ -406,6 +522,7 @@ class PyHPInterpreter
             return $ret;
         } finally {
             $this->depth--;
+            if ($pushedDir) { array_pop($this->fileDirs); }
         }
     }
 
@@ -594,6 +711,10 @@ class PyHPInterpreter
             if ($obj instanceof Closure || $obj instanceof InterpFunc) {
                 throw new PyHPError("line {$line}: functions have no property '{$name}'");
             }
+            if ($obj instanceof PyDict && array_key_exists($name, $obj->d)
+                && !method_exists($obj, $name)) {
+                return $obj->d[$name]; // module table entry (function, class factory, value)
+            }
             if (property_exists($obj, $name)) {
                 return $obj->$name;
             }
@@ -725,6 +846,11 @@ class PyHPInterpreter
                 } catch (TypeError $err) {
                     throw new PyHPTypeError("{$callee['name']}(): " . pyhp_first_line($err->getMessage()));
                 }
+                // callables stored in dicts (module tables) are dot-callable
+                if ($obj instanceof PyDict && array_key_exists($callee['name'], $obj->d)
+                    && is_callable($obj->d[$callee['name']])) {
+                    return pyhp_callfunc($obj->d[$callee['name']], $args, $callee['name']);
+                }
             }
             if (is_string($obj)) {
                 return pyhp_str_method($obj, $callee['name'], $args);
@@ -740,8 +866,12 @@ class PyHPInterpreter
                 }
                 return $target(...$args);
             }
-            if (isset($this->classes[$name])) {
-                return $this->instantiate($this->classes[$name], $args);
+            if ($name === 'require') {
+                return $this->loadModule($args, $e['line']);
+            }
+            $cls = $this->clsFind($name);
+            if ($cls !== null) {
+                return $this->instantiate($cls, $args);
             }
             if (pyhp_builtin_exists($name)) {
                 return pyhp_call_builtin($name, $args);

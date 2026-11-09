@@ -1,0 +1,55 @@
+// 06_helper.pyh — module used by examples/06_modules.pyh
+
+function shout(s) {
+    return s.upper() + "!";
+}
+
+function topWords(s, n) {
+    counts = {};
+    foreach w in s.split() {
+        counts[w] = counts.get(w, 0) + 1;
+    }
+    pairs = [];
+    foreach k, v in counts {
+        pairs.append([k, v]);
+    }
+    sortedPairs = sorted(pairs);            // deterministic base order
+    // stable selection sort by count desc (keeps both engines identical)
+    i = 0;
+    while i < len(sortedPairs) {
+        best = i;
+        j = i + 1;
+        while j < len(sortedPairs) {
+            if sortedPairs[j][1] > sortedPairs[best][1]
+               or (sortedPairs[j][1] == sortedPairs[best][1]
+                   and sortedPairs[j][0] < sortedPairs[best][0]) {
+                best = j;
+            }
+            j++;
+        }
+        if best != i {
+            tmp = sortedPairs[i];
+            sortedPairs[i] = sortedPairs[best];
+            sortedPairs[best] = tmp;
+        }
+        i++;
+    }
+    return sortedPairs[0:n];
+}
+
+class Counter {
+    int count = 0;
+    int limit = 10;
+
+    function bump(by) {
+        this.count += by;
+        if this.count > this.limit {
+            throw ValueError("counter exceeded limit " + str(this.limit));
+        }
+        return this.count;
+    }
+
+    function __str__() {
+        return "Counter(count=" + str(this.count) + ", limit=" + str(this.limit) + ")";
+    }
+}

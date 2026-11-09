@@ -374,40 +374,215 @@ print(3 not in [1, 2], "z" not in {"a": 1});
 CODE
 , "true true true\ntrue true\n"];
 
+$T[] = ['modules: relative require', <<<'CODE'
+lib = require("./lib.pyh");
+again = require("./lib.pyh");
+print(lib.shout("modules work"), lib.double(21));
+c = lib.Counter();
+c.bump(4); c.bump(6);
+print("count=" + str(c.count), "typed=" + str(c.limit * 2));
+print("cached:", lib == again);
+print("keys:", sorted(keys(lib)));
+f = lib.shout;
+print(f("as value"));
+print(lib.isEven(10), lib.isEven(7));
+CODE
+, "MODULES WORK! 42\ncount=10 typed=20\ncached: true\nkeys: ['Counter', 'double', 'isEven', 'shout']\nAS VALUE!\ntrue false\n",
+    ['files' => [
+        'lib.pyh' => <<<'LIB'
+// a tiny helper module: named functions, a lambda and a class
+function shout(s) {
+    return s.upper() + "!";
+}
+
+double = lambda n: n * 2;
+
+function isEven(n) {
+    return n % 2 == 0;
+}
+
+class Counter {
+    int count = 0;
+    int limit = 10;
+    function bump(by) {
+        this.count += by;
+        return this.count;
+    }
+}
+LIB
+    ]]];
+
+$T[] = ['modules: vendor package require', <<<'CODE'
+strutil = require("strutil");
+print(strutil.swapcase("AbC"), strutil.repeatChar("-", 5));
+print(strutil.padLeft("7", 3), strutil.padLeft("42", 3));
+w = strutil.Wizard("Ada");
+w.cast("fire"); w.cast("ice");
+print(w.spells, str(w));
+print(type(w));
+CODE
+, "aBc -----\n  7  42\n['fire', 'ice'] Wizard(Ada)\nWizard\n",
+    ['files' => [
+        'vendor/strutil/pyhp.json' => '{"name":"strutil","version":"1.2.0","main":"src/strutil.pyh"}',
+        'vendor/strutil/src/strutil.pyh' => <<<'PKG'
+// strutil — fixture package for the test suite
+function swapcase(s) {
+    out = "";
+    foreach c in s.chars() {
+        if c == c.upper() {
+            out = out + c.lower();
+        } else {
+            out = out + c.upper();
+        }
+    }
+    return out;
+}
+
+function repeatChar(ch, n) {
+    out = "";
+    i = 0;
+    while i < n {
+        out += ch;
+        i++;
+    }
+    return out;
+}
+
+function padLeft(s, width) {
+    return repeatChar(" ", width - len(s)) + s;
+}
+
+class Wizard {
+    string name = "";
+    list spells = [];
+    function __construct(name) {
+        this.name = name;
+    }
+    function cast(spell) {
+        this.spells.append(spell);
+        return this;
+    }
+    function __str__() {
+        return "Wizard(" + this.name + ")";
+    }
+}
+PKG
+    ]]];
+
+$T[] = ['modules: require inside functions + nesting', <<<'CODE'
+function viaHelper(s) {
+    m = require("./sub/helper.pyh");
+    return m.decorate(s);
+}
+print(viaHelper("deep"));
+outer = require("./sub/helper.pyh");
+inner = outer.loadInner();
+print(inner.name(), outer.tag("x"));
+CODE
+, "<deep>\ninner-module [x]\n",
+    ['files' => [
+        'sub/helper.pyh' => <<<'H1'
+function decorate(s) {
+    return "<" + s + ">";
+}
+
+function loadInner() {
+    return require("./inner.pyh");
+}
+
+function tag(s) {
+    return "[" + s + "]";
+}
+H1
+        ,
+        'sub/inner.pyh' => <<<'H2'
+function name() {
+    return "inner-module";
+}
+H2
+    ]]];
+
 /* ================================================================ */
 /* runners                                                          */
 /* ================================================================ */
 
-function run_interpreter(string $code, array $args): string {
+function run_interpreter(string $code, array $args, array $files = []): string {
+    $oldCwd = getcwd();
+    $dir = null;
+    if (count($files) > 0) {
+        $dir = pyhp_test_fixture_dir($files);
+        chdir($dir);
+    }
     ob_start();
     try {
         pyhp_set_argv($args);
         $stmts = PyHPParser::parseSource($code);
-        (new PyHPInterpreter())->runProgram($stmts);
+        $interp = new PyHPInterpreter();
+        if ($dir !== null) { $interp->setMainFile($dir . '/main.pyh'); }
+        $interp->runProgram($stmts);
     } catch (PyHPExit $e) {
         // exit(code) — output already flushed
     } catch (Throwable $e) {
         ob_end_clean();
+        if ($dir !== null) { chdir($oldCwd); pyhp_test_cleanup($dir); }
         return "<<exception>> " . get_class($e) . ": " . $e->getMessage();
     }
-    return ob_get_clean();
+    $out = ob_get_clean();
+    if ($dir !== null) { chdir($oldCwd); pyhp_test_cleanup($dir); }
+    return $out;
 }
 
-function run_compiled(string $code, array $args, string $phpBin): string {
+function run_compiled(string $code, array $args, string $phpBin, array $files = []): string {
+    $oldCwd = getcwd();
+    $dir = null;
+    if (count($files) > 0) {
+        $dir = pyhp_test_fixture_dir($files);
+        chdir($dir);
+    }
     $tmp = tempnam(sys_get_temp_dir(), 'pyhp_t_') . '.php';
     try {
         $stmts = PyHPParser::parseSource($code);
-        $php = (new PyHPTranspiler())->transpile($stmts, $tmp);
+        $t = new PyHPTranspiler();
+        if ($dir !== null) { $t->setSourceFile($dir . '/main.pyh'); }
+        $php = $t->transpile($stmts, $tmp);
         file_put_contents($tmp, $php);
     } catch (Throwable $e) {
         @unlink($tmp);
+        if ($dir !== null) { chdir($oldCwd); pyhp_test_cleanup($dir); }
         return "<<exception>> " . get_class($e) . ": " . $e->getMessage();
     }
     $cmdParts = [escapeshellarg($phpBin), escapeshellarg($tmp)];
     foreach ($args as $a) { $cmdParts[] = escapeshellarg($a); }
     $out = shell_exec(implode(' ', $cmdParts) . ' 2>&1');
     @unlink($tmp);
+    if ($dir !== null) { chdir($oldCwd); pyhp_test_cleanup($dir); }
     return $out ?? '';
+}
+
+/** Materialize module fixtures into a fresh temp dir (with main.pyh absent —
+ *  the test code itself is main). */
+function pyhp_test_fixture_dir(array $files): string {
+    $base = tempnam(sys_get_temp_dir(), 'pyhp_fx_');
+    unlink($base);
+    mkdir($base, 0777, true);
+    foreach ($files as $rel => $content) {
+        $p = $base . '/' . $rel;
+        $d = dirname($p);
+        if (!is_dir($d)) { mkdir($d, 0777, true); }
+        file_put_contents($p, $content);
+    }
+    return $base;
+}
+
+function pyhp_test_cleanup(string $dir): void {
+    if (!is_dir($dir)) return;
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::CHILD_FIRST);
+    foreach ($it as $item) {
+        $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname());
+    }
+    @rmdir($dir);
 }
 
 /* ================================================================ */
@@ -419,9 +594,17 @@ $passed = 0; $failed = 0;
 $results = [];
 
 foreach ($T as $case) {
-    [$name, $code, $expected, $args] = [$case[0], $case[1], $case[2], $case[3] ?? []];
-    $gotI = run_interpreter($code, $args);
-    $gotC = run_compiled($code, $args, $phpBin);
+    [$name, $code, $expected] = [$case[0], $case[1], $case[2]];
+    $opts = $case[3] ?? [];
+    if (isset($opts['files']) || isset($opts['args'])) {
+        $args = $opts['args'] ?? [];
+        $files = $opts['files'] ?? [];
+    } else {
+        $args = $opts;
+        $files = [];
+    }
+    $gotI = run_interpreter($code, $args, $files);
+    $gotC = run_compiled($code, $args, $phpBin, $files);
     $okI = ($gotI === $expected);
     $okC = ($gotC === $expected);
     if ($okI && $okC) {

@@ -1,0 +1,9 @@
+{
+  "name": "strings",
+  "version": "1.0.0",
+  "description": "String utilities: case conversion, padding, palindrome checks, word counts.",
+  "main": "src/strings.pyh",
+  "author": "PyHP contributors",
+  "license": "MIT",
+  "dependencies": {}
+}

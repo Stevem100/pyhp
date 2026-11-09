@@ -1,0 +1,9 @@
+{
+  "name": "mathx",
+  "version": "1.0.0",
+  "description": "Number theory and statistics: gcd, primes, fibonacci, mean, median, base conversion.",
+  "main": "src/mathx.pyh",
+  "author": "PyHP contributors",
+  "license": "MIT",
+  "dependencies": {}
+}

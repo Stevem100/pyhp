@@ -16,8 +16,8 @@ require_once __DIR__ . '/runtime.php';
 
 class PyHPTranspiler
 {
-    private array $classNames = [];      // PyHP name => ['ext' => ?name]
-    private array $topFuncs = [];        // top-level function names
+    private array $classNames = [];      // PyHP name => ['ext' => ?name]  (main file)
+    private array $topFuncs = [];        // top-level function names         (main file)
     private array $scopeStack = [];      // each: ['assigned' => string[], 'types' => [name=>type]]
     private int $tmpN = 0;
     private int $indent = 0;
@@ -26,9 +26,43 @@ class PyHPTranspiler
     private string $curFnLabel = '<main>'; // current function display name
     private ?string $curClass = null;    // current class being emitted
     private array $classPropTypes = [];  // PyHP name => [prop => type] (resolved incl. inherited)
+    private string $ns = '';             // '' for main file, 'mN_' while emitting a module
+    private array $modFuncs = [];        // ns => [name => true]
+    private array $modClasses = [];      // ns => [name => ['ext' => ?name]]
+    private array $modPropTypes = [];    // ns => [name => [prop => type]]
+    private array $pendingMods = [];     // generated PHP for module functions/classes
+    private array $modCache = [];        // realpath => module id
+    private array $modStack = [];        // require chain (cycle detection)
+    private ?string $sourceDir = null;   // dir of the file being transpiled
+
+    /** Point the transpiler at the source file so require() resolves
+     *  relative paths and vendor packages against it. */
+    public function setSourceFile(string $file): void {
+        $rp = realpath($file);
+        $this->sourceDir = $rp !== false ? dirname($rp) : dirname($file);
+    }
+
+    private function fnPhp(string $n): string  { return 'pyhp_fn_' . $this->ns . $n; }
+    private function clsPhp(string $n): string { return 'PyHP_' . $this->ns . $n; }
+    private function funcKnown(string $n): bool {
+        if ($this->ns !== '') return isset($this->modFuncs[$this->ns][$n]);
+        return isset($this->topFuncs[$n]);
+    }
+    private function clsKnown(string $n): bool {
+        if ($this->ns !== '') return isset($this->modClasses[$this->ns][$n]);
+        return isset($this->classNames[$n]);
+    }
+    private function propTypeOf(string $cls, string $prop): ?string {
+        if ($this->ns !== '') return $this->modPropTypes[$this->ns][$cls][$prop] ?? null;
+        return $this->classPropTypes[$cls][$prop] ?? null;
+    }
 
     public function transpile(array $stmts, string $outFile): string {
         $this->outFile = $outFile;
+        $this->pendingMods = [];
+        $this->modCache = [];
+        $this->modStack = [];
+        $this->ns = '';
         $this->prePass($stmts);
 
         $this->indent = 0;
@@ -39,8 +73,12 @@ class PyHPTranspiler
         $L[] = 'require_once ' . $this->runtimePath() . ';';
         $L[] = 'if (!isset($GLOBALS[\'__pyhp_argv\'])) { $GLOBALS[\'__pyhp_argv\'] = array_slice($argv ?? [], 1); }';
         $L[] = '';
+        $prologue = count($L);
         $this->scopeStack = [['assigned' => [], 'types' => []]];
         foreach ($stmts as $s) { $this->emitStmt($s, $L); }
+        if (count($this->pendingMods) > 0) {
+            array_splice($L, $prologue, 0, $this->pendingMods);
+        }
         return implode("\n", $L) . "\n";
     }
 
@@ -71,16 +109,22 @@ class PyHPTranspiler
     private function prePassStmts(array $stmts, bool $top): void {
         foreach ($stmts as $s) {
             if ($top && $s['k'] === 'Class') {
-                $this->classNames[$s['name']] = ['ext' => $s['ext']];
                 $props = [];
                 foreach ($s['members'] as $m) {
                     if ($m['k'] === 'VarDecl' && $m['type'] !== null && $m['type'] !== 'var') {
                         $props[$m['name']] = $m['type'];
                     }
                 }
-                $this->classPropTypes[$s['name']] = $props;
+                if ($this->ns === '') {
+                    $this->classNames[$s['name']] = ['ext' => $s['ext']];
+                    $this->classPropTypes[$s['name']] = $props;
+                } else {
+                    $this->modClasses[$this->ns][$s['name']] = ['ext' => $s['ext']];
+                    $this->modPropTypes[$this->ns][$s['name']] = $props;
+                }
             } elseif ($top && $s['k'] === 'Func' && $s['name'] !== null) {
-                $this->topFuncs[$s['name']] = true;
+                if ($this->ns === '') { $this->topFuncs[$s['name']] = true; }
+                else { $this->modFuncs[$this->ns][$s['name']] = true; }
             }
             if ($top) {
                 switch ($s['k']) {
@@ -373,7 +417,7 @@ class PyHPTranspiler
             $name = $t['name'];
             $v = $this->emitExpr($e['value']);
             if ($t['obj']['k'] === 'This') {
-                $ptype = $this->curClass !== null ? ($this->classPropTypes[$this->curClass][$name] ?? null) : null;
+                $ptype = $this->curClass !== null ? $this->propTypeOf($this->curClass, $name) : null;
                 if ($op === '=') {
                     if ($ptype !== null && $ptype !== 'var') {
                         return "\$this->{$name} = pyhp_check_type({$v}, '{$ptype}', '{$name}')";
@@ -404,7 +448,8 @@ class PyHPTranspiler
     }
 
     private function compoundAssign(string $op, string $varExpr, string $valueExpr): string {
-        return $varExpr . ' ' . substr($op, 0, -1) . '= ' . $valueExpr;
+        // route through the pyhp_* helpers so string `+=` concat matches the interpreter
+        return $varExpr . ' = ' . $this->compoundExpr($op, $varExpr, $valueExpr);
     }
 
     private function compoundExpr(string $op, string $old, string $value): string {
@@ -458,7 +503,7 @@ class PyHPTranspiler
         if ($type === null) return 'PyHPError';
         $map = pyhp_error_class_map();
         if (isset($map[$type])) return $map[$type];
-        if (isset($this->classNames[$type])) return 'PyHP_' . $type;
+        if ($this->clsKnown($type)) return $this->clsPhp($type);
         return 'PyHPError';
     }
 
@@ -539,7 +584,7 @@ class PyHPTranspiler
     }
 
     private function emitTopFunction(array $s, array &$L): void {
-        $this->w($L, 'function pyhp_fn_' . $s['name'] . '(' . $this->emitParamList($s['params']) . ') {');
+        $this->w($L, 'function ' . $this->fnPhp($s['name']) . '(' . $this->emitParamList($s['params']) . ') {');
         $this->indent++;
         $this->pushScope();
         $prevRet = $this->curRet;
@@ -596,12 +641,17 @@ class PyHPTranspiler
 
     private function emitClass(array $s, array &$L): void {
         $name = $s['name'];
-        $phpName = 'PyHP_' . $name;
+        $phpName = $this->clsPhp($name);
         $ext = '';
         if ($s['ext'] !== null) {
             $map = pyhp_error_class_map();
-            $ext = isset($this->classNames[$s['ext']]) ? ' extends PyHP_' . $s['ext']
-                : (isset($map[$s['ext']]) ? ' extends ' . $map[$s['ext']] : '');
+            if ($this->clsKnown($s['ext'])) {
+                $ext = ' extends ' . $this->clsPhp($s['ext']);
+            } elseif (isset($map[$s['ext']])) {
+                $ext = ' extends ' . $map[$s['ext']];
+            } elseif ($this->ns !== '') {
+                throw new PyHPSyntaxError("line {$s['line']}: module classes cannot extend classes from other files");
+            }
         }
         $this->w($L, "class {$phpName}{$ext} {");
         $this->indent++;
@@ -723,10 +773,10 @@ class PyHPTranspiler
             }
             case 'Var':
                 // a top-level function referenced as a value becomes its callable name
-                if (isset($this->topFuncs[$e['name']])) {
+                if ($this->funcKnown($e['name'])) {
                     $scope = $this->curScope();
                     if (!in_array($e['name'], $scope['assigned'], true)) {
-                        return var_export('pyhp_fn_' . $e['name'], true);
+                        return var_export($this->fnPhp($e['name']), true);
                     }
                 }
                 return '$' . $e['name'];
@@ -767,7 +817,7 @@ class PyHPTranspiler
             case 'Member': {
                 $name = $e['name'];
                 if ($e['obj']['k'] === 'This') return "\$this->{$name}";
-                return '(' . $this->emitExpr($e['obj']) . ")->{$name}";
+                return "pyhp_member(" . $this->emitExpr($e['obj']) . ', ' . var_export($name, true) . ')';
             }
             case 'Call':
                 return $this->emitCall($e);
@@ -844,6 +894,128 @@ class PyHPTranspiler
         return implode(', ', array_map(fn($a) => $this->emitExpr($a), $args));
     }
 
+    /* ---------------- modules ---------------- */
+
+    /** Compile `require("<spec>")`: resolve, transpile the module in its own
+     *  namespace, emit it into the pending buffer, and return a call to a
+     *  module-init function that builds (and caches) the export table. */
+    private function emitRequire(array $e): string {
+        $args = $e['args'];
+        if (count($args) !== 1) {
+            throw new PyHPSyntaxError("line {$e['line']}: require() takes exactly 1 argument(s), got " . count($args));
+        }
+        $a = $args[0];
+        if ($a['k'] !== 'Str') {
+            throw new PyHPSyntaxError("line {$e['line']}: require() takes a literal module name or path in compiled mode");
+        }
+        $spec = $a['v'];
+        $base = $this->sourceDir ?? (getcwd() ?: '.');
+        $path = pyhp_resolve_module($spec, $base);
+        if ($path === null) {
+            throw new PyHPSyntaxError("line {$e['line']}: ModuleNotFoundError: cannot find module '{$spec}' (looked in ./vendor and the registry)");
+        }
+        if (isset($this->modCache[$path])) {
+            return 'pyhp_module_' . $this->modCache[$path] . '()';
+        }
+        if (in_array($path, $this->modStack, true)) {
+            throw new PyHPSyntaxError("circular module dependency: '{$spec}'");
+        }
+        $id = 'm' . count($this->modCache);
+        $this->modCache[$path] = $id;
+
+        $src = file_get_contents($path);
+        $stmts = PyHPParser::parseSource($src);
+        [$funcNames, $lambdaNames, $classNames] = $this->moduleExportNames($stmts);
+
+        $savedNs = $this->ns;
+        $savedDir = $this->sourceDir;
+        $savedIndent = $this->indent;
+        $this->ns = $id . '_';
+        $this->sourceDir = dirname($path);
+        $this->modStack[] = $path;
+
+        // collect the module's own funcs/classes, then resolve property types
+        $this->prePassStmts($stmts, true);
+        foreach ($this->modClasses[$this->ns] ?? [] as $name => $def) {
+            $chain = [];
+            $c = $name;
+            while ($c !== null && isset($this->modClasses[$this->ns][$c])) {
+                array_unshift($chain, $c);
+                $c = $this->modClasses[$this->ns][$c]['ext'];
+            }
+            $resolved = [];
+            foreach ($chain as $cn) {
+                foreach ($this->modPropTypes[$this->ns][$cn] ?? [] as $p => $t) { $resolved[$p] = $t; }
+            }
+            $this->modPropTypes[$this->ns][$name] = $resolved;
+        }
+
+        // function/class definitions are hoisted to file scope
+        $buf = [];
+        foreach ($stmts as $s) {
+            if ($s['k'] === 'Func' && $s['name'] !== null) $this->emitTopFunction($s, $buf);
+            elseif ($s['k'] === 'Class') $this->emitClass($s, $buf);
+        }
+
+        // init function: run top-level statements once, then build the table
+        $this->indent = 1;
+        $this->pushScope();
+        $this->w($buf, 'function pyhp_module_' . $id . '() {');
+        $this->indent = 2;
+        $this->w($buf, 'static $m = null;');
+        $this->w($buf, 'if ($m !== null) { return $m; }');
+        foreach ($stmts as $s) {
+            if ($s['k'] === 'Func' && $s['name'] !== null) continue; // hoisted above
+            if ($s['k'] === 'Class') continue;                       // hoisted above
+            $this->emitStmt($s, $buf);
+        }
+        $entries = [];
+        foreach ($funcNames as $n) {
+            $entries[] = var_export($n, true) . ' => fn(...$__a) => ' . $this->fnPhp($n) . '(...$__a)';
+        }
+        foreach ($lambdaNames as $n) {
+            // lambdas live in local vars of this init function; arrow fns capture by value
+            $entries[] = var_export($n, true) . ' => fn(...$__a) => $' . $n . '(...$__a)';
+        }
+        foreach ($classNames as $n) {
+            $entries[] = var_export($n, true) . ' => fn(...$__a) => new ' . $this->clsPhp($n) . '(...$__a)';
+        }
+        $this->w($buf, '$m = new PyDict([' . implode(', ', $entries) . ']);');
+        $this->w($buf, 'return $m;');
+        $this->indent = 1;
+        $this->w($buf, '}');
+        $this->w($buf, '');
+        $this->popScope();
+        $this->pendingMods[] = implode("\n", $buf);
+
+        array_pop($this->modStack);
+        $this->sourceDir = $savedDir;
+        $this->ns = $savedNs;
+        $this->indent = $savedIndent;
+        return 'pyhp_module_' . $id . '()';
+    }
+
+    /** Static scan of a module AST: exported names = named top-level functions,
+     *  top-level lambda assignments, and top-level classes. */
+    private function moduleExportNames(array $stmts): array {
+        $funcs = [];
+        $lambdas = [];
+        $classes = [];
+        foreach ($stmts as $s) {
+            if ($s['k'] === 'Func' && $s['name'] !== null) {
+                $funcs[] = $s['name'];
+            } elseif ($s['k'] === 'Expr' && $s['e']['k'] === 'Assign'
+                && $s['e']['target']['k'] === 'Var' && $s['e']['value']['k'] === 'Func') {
+                $lambdas[] = $s['e']['target']['name'];
+            } elseif ($s['k'] === 'VarDecl' && $s['init'] !== null && $s['init']['k'] === 'Func') {
+                $lambdas[] = $s['name'];
+            } elseif ($s['k'] === 'Class') {
+                $classes[] = $s['name'];
+            }
+        }
+        return [$funcs, $lambdas, $classes];
+    }
+
     private function emitCall(array $e): string {
         $callee = $e['callee'];
         if ($callee['k'] === 'Super') {
@@ -866,11 +1038,14 @@ class PyHPTranspiler
             if (in_array($name, $scope['assigned'], true)) {
                 return "pyhp_callfunc(\${$name}, [" . $this->emitCallArgs($e['args']) . "], " . var_export($name, true) . ')';
             }
-            if (isset($this->topFuncs[$name])) {
-                return 'pyhp_fn_' . $name . '(' . $this->emitCallArgs($e['args']) . ')';
+            if ($name === 'require') {
+                return $this->emitRequire($e);
             }
-            if (isset($this->classNames[$name])) {
-                return 'new PyHP_' . $name . '(' . $this->emitCallArgs($e['args']) . ')';
+            if ($this->funcKnown($name)) {
+                return $this->fnPhp($name) . '(' . $this->emitCallArgs($e['args']) . ')';
+            }
+            if ($this->clsKnown($name)) {
+                return 'new ' . $this->clsPhp($name) . '(' . $this->emitCallArgs($e['args']) . ')';
             }
             if (isset($map[$name])) {
                 return 'new ' . $map[$name] . '(' . $this->emitCallArgs($e['args']) . ')';

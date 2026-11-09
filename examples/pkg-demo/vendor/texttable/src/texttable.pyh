@@ -1,0 +1,94 @@
+// texttable — render rows as an aligned ASCII table.
+// rows: list of dicts (headers taken from keys of the first row)
+//   or list of lists (pass headers explicitly).
+// Pure functions only: no module state, no side effects.
+
+function _repeat(ch, n) {
+    out = "";
+    i = 0;
+    while i < n {
+        out = out + ch;
+        i++;
+    }
+    return out;
+}
+
+function _pad(s, width) {
+    s = str(s);
+    return s + _repeat(" ", width - len(s));
+}
+
+function _headersOf(rows) {
+    if len(rows) == 0 {
+        return [];
+    }
+    first = rows[0];
+    if type(first) == "dict" {
+        return keys(first);
+    }
+    return null;
+}
+
+function _rowValues(row, headers) {
+    if type(row) == "dict" {
+        out = [];
+        foreach h in headers {
+            out.append(row.get(h, ""));
+        }
+        return out;
+    }
+    return row;
+}
+
+function render(rows, headers = null) {
+    auto = _headersOf(rows);
+    if headers == null {
+        headers = auto;
+        if headers == null {
+            headers = [];
+        }
+    }
+    widths = {};
+    foreach h in headers {
+        widths[h] = len(str(h));
+    }
+    foreach row in rows {
+        vals = _rowValues(row, headers);
+        i = 0;
+        foreach h in headers {
+            w = len(str(vals[i]));
+            if w > widths[h] {
+                widths[h] = w;
+            }
+            i++;
+        }
+    }
+
+    sep = "+";
+    foreach h in headers {
+        sep = sep + "-" + _repeat("-", widths[h]);
+    }
+    sep = sep + "+";
+
+    head = "|";
+    foreach h in headers {
+        head = head + " " + _pad(h, widths[h]) + " |";
+    }
+    lines = [sep, head, sep];
+    foreach row in rows {
+        vals = _rowValues(row, headers);
+        line = "|";
+        i = 0;
+        foreach h in headers {
+            line = line + " " + _pad(vals[i], widths[h]) + " |";
+            i++;
+        }
+        lines.append(line);
+    }
+    lines.append(sep);
+    return "\n".join(lines);
+}
+
+function printTable(rows, headers = null) {
+    echo render(rows, headers);
+}

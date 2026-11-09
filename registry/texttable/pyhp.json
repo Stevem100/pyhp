@@ -1,0 +1,9 @@
+{
+  "name": "texttable",
+  "version": "1.0.0",
+  "description": "Render lists of dicts (or lists) as aligned ASCII tables.",
+  "main": "src/texttable.pyh",
+  "author": "PyHP contributors",
+  "license": "MIT",
+  "dependencies": {}
+}
