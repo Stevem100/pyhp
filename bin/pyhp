@@ -258,7 +258,8 @@ function pyhp_balanced(string $s): bool {
 const PYHP_REPO_API  = 'https://api.github.com/repos/Stevem100/pyhp/releases/latest';
 const PYHP_REPO_MAIN = 'https://codeload.github.com/Stevem100/pyhp/zip/refs/heads/main';
 
-function pyhp_http_get(string $url): ?string {
+function pyhp_http_get(string $url, string &$err = ''): ?string {
+    $err = '';
     if (function_exists('curl_init')) {
         $ch = curl_init($url);
         curl_setopt_array($ch, [
@@ -266,19 +267,25 @@ function pyhp_http_get(string $url): ?string {
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_USERAGENT      => 'pyhp-cli/' . PYHP_VERSION,
             CURLOPT_TIMEOUT        => 180,
+            CURLOPT_CONNECTTIMEOUT => 15,
         ]);
         $data = curl_exec($ch);
         $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        $cerr = curl_error($ch);
         curl_close($ch);
-        return ($code === 200 && is_string($data)) ? $data : null;
+        if ($data === false || $data === null) { $err = $cerr !== '' ? $cerr : 'request failed'; return null; }
+        if ($code !== 200) { $err = "HTTP {$code}"; return null; }
+        return $data;
     }
     $ctx = stream_context_create(['http' => [
         'header' => "User-Agent: pyhp-cli/" . PYHP_VERSION . "\r\n",
         'timeout' => 180,
         'follow_location' => 1,
+        'ignore_errors' => false,
     ]]);
     $data = @file_get_contents($url, false, $ctx);
-    return $data === false ? null : $data;
+    if ($data === false) { $err = 'request failed'; return null; }
+    return $data;
 }
 
 function pyhp_http_download(string $url, string $dest): bool {
@@ -537,6 +544,144 @@ function pyhp_pkg_copy_dir(string $src, string $dst): void {
     }
 }
 
+/** Base URLs of remote registries: PYHP_REGISTRY (http/https) plus the
+ *  project manifest's "registries" list. A registry serves index.json:
+ *  {"packages": {"<name>": {"<version>": {"url": "...", "sha256": "..."}}}} */
+function pyhp_pkg_remote_registries(array $man): array {
+    $urls = [];
+    $env = getenv('PYHP_REGISTRY');
+    if ($env !== false && preg_match('#^https?://#i', $env)) $urls[] = rtrim($env, '/');
+    foreach ((array)($man['registries'] ?? []) as $r) {
+        if (is_string($r) && preg_match('#^https?://#i', $r)) $urls[] = rtrim($r, '/');
+    }
+    return array_values(array_unique($urls));
+}
+
+/** Extract a package zip; returns the directory that holds pyhp.json. */
+function pyhp_zip_extract_pkg(string $zipFile, string $dest): ?string {
+    if (!class_exists('ZipArchive')) return null;
+    $zip = new ZipArchive();
+    if ($zip->open($zipFile) !== true) return null;
+    if (!is_dir($dest)) mkdir($dest, 0777, true);
+    $zip->extractTo($dest);
+    $zip->close();
+    if (is_file($dest . '/pyhp.json')) return $dest;
+    foreach (scandir($dest) ?: [] as $d) {
+        if ($d[0] === '.') continue;
+        if (is_file($dest . '/' . $d . '/pyhp.json')) return $dest . '/' . $d;
+    }
+    return null;
+}
+
+/** Deterministic content hash of a package directory (sorted relpaths). */
+function pyhp_pkg_dir_sha(string $dir): string {
+    $paths = [];
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($dir, FilesystemIterator::SKIP_DOTS));
+    foreach ($it as $item) { if ($item->isFile()) $paths[] = $it->getSubPathName(); }
+    sort($paths, SORT_STRING);
+    $ctx = hash_init('sha256');
+    foreach ($paths as $p) {
+        hash_update($ctx, str_replace('\\', '/', $p) . "\n");
+        hash_update($ctx, hash_file('sha256', $dir . '/' . $p) . "\n");
+    }
+    return hash_final($ctx);
+}
+
+function pyhp_lock_read(string $cwd): array {
+    $f = $cwd . '/pyhp.lock.json';
+    if (!is_file($f)) return [];
+    $j = json_decode((string)file_get_contents($f), true);
+    return is_array($j) ? $j : [];
+}
+
+function pyhp_lock_write(string $cwd, array $lock): void {
+    file_put_contents($cwd . '/pyhp.lock.json',
+        json_encode($lock, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n");
+}
+
+function pyhp_lock_set(array &$lock, string $name, string $ver, string $source, string $sha): void {
+    $lock['lock'] = 1;
+    $lock['packages'][$name] = ['version' => $ver, 'source' => $source, 'sha256' => $sha];
+}
+
+/** Install one package into vendor/ from a resolved source. Returns version. */
+function pyhp_pkg_install_source(string $cwd, string $name, array $res): string {
+    $vend = $cwd . '/vendor/' . $name;
+    if (is_dir($vend)) {
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($vend, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST);
+        foreach ($it as $item) { $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname()); }
+        @rmdir($vend);
+    }
+    if ($res['kind'] === 'dir') {
+        pyhp_pkg_copy_dir($res['dir'], $vend);
+    } else {
+        $tmp = sys_get_temp_dir() . '/pyhp-pkg-' . bin2hex(random_bytes(6));
+        $root = pyhp_zip_extract_pkg($res['file'], $tmp);
+        if ($root === null) { fwrite(STDERR, "pkg: not a valid package zip (no pyhp.json): {$res['file']}\n"); exit(1); }
+        pyhp_pkg_copy_dir($root, $vend);
+        $it = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($tmp, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::CHILD_FIRST);
+        foreach ($it as $item) { $item->isDir() ? @rmdir($item->getPathname()) : @unlink($item->getPathname()); }
+        @rmdir($tmp);
+    }
+    $meta = pyhp_pkg_read_manifest($vend);
+    return $meta['version'] ?? $res['version'] ?? '0.0.0';
+}
+
+/** Resolve a package spec to an installable source.
+ *  Order: local registry dirs -> remote registries (index.json) -> the spec
+ *  itself as a zip URL. Remote zips are sha256-verified when the index or a
+ *  #sha256= fragment provides one. */
+function pyhp_pkg_resolve(string $name, ?string $wantVer): array {
+    $dir = pyhp_pkg_locate($name);
+    if ($dir !== null) {
+        $meta = pyhp_pkg_read_manifest($dir);
+        $ver = $meta['version'] ?? '0.0.0';
+        if ($wantVer !== null && $wantVer !== $ver) {
+            fwrite(STDERR, "pkg: requested {$name}@{$wantVer} but the registry has {$ver}\n");
+            exit(1);
+        }
+        return ['kind' => 'dir', 'dir' => $dir, 'version' => $ver,
+                'source' => 'registry:' . $dir, 'sha256' => pyhp_pkg_dir_sha($dir)];
+    }
+    foreach (pyhp_pkg_remote_registries(pyhp_pkg_read_manifest(getcwd() ?: '.')) as $base) {
+        $err = '';
+        $body = pyhp_http_get($base . '/index.json', $err);
+        if ($body === null) { fwrite(STDERR, "pkg: registry {$base} unreachable ({$err})\n"); continue; }
+        $idx = json_decode($body, true);
+        $entryV = $idx['packages'][$name] ?? null;
+        if (!is_array($entryV)) continue;
+        $cands = array_keys($entryV);
+        if (count($cands) === 0) continue;
+        usort($cands, 'version_compare');
+        $ver = $wantVer ?? end($cands);
+        if (!isset($entryV[$ver]) || !is_array($entryV[$ver])) {
+            fwrite(STDERR, "pkg: registry {$base} has {$name} " . implode(', ', $cands) . " — not {$ver}\n");
+            exit(1);
+        }
+        $url = $entryV[$ver]['url'] ?? null;
+        if ($url === null) { fwrite(STDERR, "pkg: registry entry for {$name}@{$ver} has no url\n"); exit(1); }
+        $sha = $entryV[$ver]['sha256'] ?? null;
+        $tmp = sys_get_temp_dir() . '/pyhp-pkg-' . bin2hex(random_bytes(6)) . '.zip';
+        $err = '';
+        $zipBody = pyhp_http_get($url, $err);
+        if ($zipBody === null) { fwrite(STDERR, "pkg: download failed: {$url} ({$err})\n"); exit(1); }
+        file_put_contents($tmp, $zipBody);
+        $got = hash_file('sha256', $tmp);
+        if ($sha !== null && $got !== $sha) {
+            fwrite(STDERR, "pkg: checksum mismatch for {$name}@{$ver}\n  expected {$sha}\n  got      {$got}\n");
+            exit(1);
+        }
+        return ['kind' => 'zip', 'file' => $tmp, 'version' => $ver, 'url' => $url,
+                'source' => $url, 'sha256' => $sha ?? $got];
+    }
+    return null;
+}
+
 function pyhp_pkg_init(array $args): int {
     $cwd = getcwd();
     if ($cwd === false) { fwrite(STDERR, "pkg: cannot determine working directory\n"); return 1; }
@@ -575,36 +720,149 @@ function pyhp_pkg_locate(string $name): ?string {
 }
 
 function pyhp_pkg_add(array $args): int {
-    if (!isset($args[0])) { fwrite(STDERR, "usage: pyhp pkg add <name>[@version]\n"); return 1; }
+    if (!isset($args[0])) { fwrite(STDERR, "usage: pyhp pkg add <name|url>[@version]\n"); return 1; }
     $spec = $args[0];
-    $at = strpos($spec, '@');
-    $wantVer = $at === false ? null : substr($spec, $at + 1);
-    $name = $at === false ? $spec : substr($spec, 0, $at);
     $cwd = getcwd();
     if ($cwd === false || !is_file($cwd . '/pyhp.json')) {
         fwrite(STDERR, "pkg: no pyhp.json here — run 'pyhp pkg init' first\n");
         return 1;
     }
-    $srcDir = pyhp_pkg_locate($name);
-    if ($srcDir === null) {
-        fwrite(STDERR, "pkg: package '{$name}' not found in registry\n");
-        fwrite(STDERR, "  searched: " . implode("\n           ", pyhp_pkg_registry_dirs() ?: ['(no registry found)']) . "\n");
+    $isUrl = (bool)preg_match('#^(https?|file)://#i', $spec);
+    $at = strrpos($spec, '@');
+    $wantVer = ($at !== false && !$isUrl) ? substr($spec, $at + 1) : null;
+    $name = ($at !== false && !$isUrl) ? substr($spec, 0, $at) : $spec;
+
+    if ($isUrl) {
+        $err = '';
+        $body = pyhp_http_get($spec, $err);
+        if ($body === null) { fwrite(STDERR, "pkg: download failed: {$spec} ({$err})\n"); return 1; }
+        $tmp = sys_get_temp_dir() . '/pyhp-pkg-' . bin2hex(random_bytes(6)) . '.zip';
+        file_put_contents($tmp, $body);
+        $sha = hash_file('sha256', $tmp);
+        $frag = parse_url($spec, PHP_URL_FRAGMENT) ?? '';
+        if (strpos($frag, 'sha256=') === 0 && substr($frag, 7) !== $sha) {
+            fwrite(STDERR, "pkg: checksum mismatch for {$spec}\n  expected " . substr($frag, 7) . "\n  got      {$sha}\n");
+            return 1;
+        }
+        $probe = sys_get_temp_dir() . '/pyhp-pkg-' . bin2hex(random_bytes(6));
+        $root = pyhp_zip_extract_pkg($tmp, $probe);
+        if ($root === null) { fwrite(STDERR, "pkg: not a valid package zip (no pyhp.json inside)\n"); return 1; }
+        $meta = pyhp_pkg_read_manifest($root);
+        $name = $meta['name'] ?? basename(parse_url($spec, PHP_URL_PATH) ?? 'package');
+        $name = preg_replace('/[^A-Za-z0-9_.-]/', '-', $name);
+        $ver = $meta['version'] ?? '0.0.0';
+        if ($wantVer !== null && $wantVer !== $ver) {
+            fwrite(STDERR, "pkg: requested {$wantVer} but the package is {$ver}\n");
+            return 1;
+        }
+        $got = pyhp_pkg_install_source($cwd, $name, ['kind' => 'zip', 'file' => $tmp, 'version' => $ver]);
+        $lock = pyhp_lock_read($cwd);
+        pyhp_lock_set($lock, $name, $got, $spec, $sha);
+        pyhp_lock_write($cwd, $lock);
+        $man = pyhp_pkg_read_manifest($cwd);
+        $deps = $man['dependencies'] ?? [];
+        $deps[$name] = $got;
+        $man['dependencies'] = $deps;
+        pyhp_pkg_write_manifest($cwd, $man);
+        echo "added {$name}@{$got} from {$spec} -> vendor/{$name}\n";
+        echo "pinned in pyhp.lock.json (sha256 " . substr($sha, 0, 12) . "…)\n";
+        echo "use it:   m = require(\"{$name}\");\n";
+        return 0;
+    }
+
+    $res = pyhp_pkg_resolve($name, $wantVer);
+    if ($res === null) {
+        fwrite(STDERR, "pkg: package '{$name}' not found\n");
+        $regs = array_merge(pyhp_pkg_registry_dirs(), pyhp_pkg_remote_registries(pyhp_pkg_read_manifest($cwd)));
+        fwrite(STDERR, "  searched: " . implode("\n           ", $regs ?: ['(no registry found — set one via pyhp.json "registries" or PYHP_REGISTRY)']) . "\n");
         return 1;
     }
-    $meta = pyhp_pkg_read_manifest($srcDir);
-    $ver = $meta['version'] ?? '0.0.0';
-    if ($wantVer !== null && $wantVer !== $ver) {
-        fwrite(STDERR, "pkg: requested {$name}@{$wantVer} but registry has {$ver}\n");
-        return 1;
-    }
-    pyhp_pkg_copy_dir($srcDir, $cwd . '/vendor/' . $name);
+    $got = pyhp_pkg_install_source($cwd, $name, $res);
+    $lock = pyhp_lock_read($cwd);
+    pyhp_lock_set($lock, $name, $got, $res['source'], $res['sha256']);
+    pyhp_lock_write($cwd, $lock);
     $man = pyhp_pkg_read_manifest($cwd);
     $deps = $man['dependencies'] ?? [];
-    $deps[$name] = $ver;
+    $deps[$name] = $got;
     $man['dependencies'] = $deps;
     pyhp_pkg_write_manifest($cwd, $man);
-    echo "added {$name}@{$ver} -> vendor/{$name}\n";
+    echo "added {$name}@{$got} -> vendor/{$name}\n";
+    echo "pinned in pyhp.lock.json\n";
     echo "use it:   m = require(\"{$name}\");\n";
+    return 0;
+}
+
+/** pyhp pkg install — (re)install every dependency of pyhp.json, honouring
+ *  pyhp.lock.json pins (exact source + sha256) when present. */
+function pyhp_pkg_install(array $args): int {
+    $cwd = getcwd();
+    if ($cwd === false || !is_file($cwd . '/pyhp.json')) {
+        fwrite(STDERR, "pkg: no pyhp.json here — run 'pyhp pkg init' first\n");
+        return 1;
+    }
+    $man = pyhp_pkg_read_manifest($cwd);
+    $deps = $man['dependencies'] ?? [];
+    if (count($deps) === 0) { echo "no dependencies to install\n"; return 0; }
+    $lock = pyhp_lock_read($cwd);
+    $fail = 0;
+    foreach ($deps as $name => $want) {
+        $vend = $cwd . '/vendor/' . $name;
+        $pin = $lock['packages'][$name] ?? null;
+        if (is_dir($vend . '/src') || is_file($vend . '/pyhp.json')) {
+            $sha = pyhp_pkg_dir_sha($vend);
+            if ($pin !== null && $pin['sha256'] === $sha) {
+                echo "ok  {$name}@" . ($pin['version'] ?? '?') . " (matches lock)\n";
+                continue;
+            }
+            if ($pin === null) {
+                echo "ok  {$name}@" . (pyhp_pkg_read_manifest($vend)['version'] ?? '?') . " (unlocked)\n";
+                continue;
+            }
+            fwrite(STDERR, "pkg: vendor/{$name} does not match pyhp.lock.json — reinstalling\n");
+        }
+        if ($pin !== null && preg_match('#^(https?|file)://#i', (string)$pin['source'])) {
+            $err = '';
+            $body = pyhp_http_get($pin['source'], $err);
+            if ($body === null) { fwrite(STDERR, "pkg: {$name}: download failed: {$pin['source']} ({$err})\n"); $fail++; continue; }
+            $tmp = sys_get_temp_dir() . '/pyhp-pkg-' . bin2hex(random_bytes(6)) . '.zip';
+            file_put_contents($tmp, $body);
+            $got = hash_file('sha256', $tmp);
+            if ($got !== $pin['sha256']) {
+                fwrite(STDERR, "pkg: {$name}: checksum mismatch against lock\n  expected {$pin['sha256']}\n  got      {$got}\n");
+                $fail++; continue;
+            }
+            $ver = pyhp_pkg_install_source($cwd, $name, ['kind' => 'zip', 'file' => $tmp, 'version' => $pin['version'] ?? null]);
+            echo "installed {$name}@{$ver} from lock\n";
+        } else {
+            $res = pyhp_pkg_resolve($name, $pin['version'] ?? (is_string($want) ? $want : null));
+            if ($res === null) { fwrite(STDERR, "pkg: {$name}: not found in any registry\n"); $fail++; continue; }
+            if ($pin !== null && $res['sha256'] !== $pin['sha256']) {
+                fwrite(STDERR, "pkg: {$name}: registry copy does not match pyhp.lock.json\n");
+                $fail++; continue;
+            }
+            $ver = pyhp_pkg_install_source($cwd, $name, $res);
+            pyhp_lock_set($lock, $name, $ver, $res['source'], $res['sha256']);
+            echo "installed {$name}@{$ver}\n";
+        }
+    }
+    pyhp_lock_write($cwd, $lock);
+    return $fail === 0 ? 0 : 1;
+}
+
+/** pyhp pkg update [name] — drop lock pins (all, or one package) and
+ *  re-resolve from the registries. */
+function pyhp_pkg_update(array $args): int {
+    $cwd = getcwd();
+    $lock = pyhp_lock_read($cwd);
+    $one = $args[0] ?? null;
+    if ($one !== null) {
+        unset($lock['packages'][$one]);
+        echo "unpinned {$one} — run 'pyhp pkg install' (or pkg add {$one}) to re-resolve\n";
+    } else {
+        $lock['packages'] = new stdClass();
+        echo "unpinned all packages — run 'pyhp pkg install' to re-resolve\n";
+    }
+    pyhp_lock_write($cwd, $lock);
     return 0;
 }
 
@@ -621,6 +879,11 @@ function pyhp_pkg_remove(array $args): int {
     unset($deps[$name]);
     $man['dependencies'] = $deps;
     pyhp_pkg_write_manifest($cwd, $man);
+    $lock = pyhp_lock_read($cwd);
+    if (isset($lock['packages'][$name])) {
+        unset($lock['packages'][$name]);
+        pyhp_lock_write($cwd, $lock);
+    }
     $vend = $cwd . '/vendor/' . $name;
     if (is_dir($vend)) {
         $it = new RecursiveIteratorIterator(
@@ -642,9 +905,11 @@ function pyhp_pkg_list(): int {
         echo "dependencies: (none)\n";
     } else {
         echo "dependencies:\n";
+        $lock = pyhp_lock_read($cwd);
         foreach ($deps as $n => $v) {
-            $in = is_dir($cwd . '/vendor/' . $n) ? 'installed' : 'NOT installed (run: pyhp pkg add ' . $n . ')';
-            echo "  {$n}@{$v}  [{$in}]\n";
+            $in = is_dir($cwd . '/vendor/' . $n) ? 'installed' : 'NOT installed (run: pyhp pkg install)';
+            $pin = isset($lock['packages'][$n]['version']) ? ', locked ' . $lock['packages'][$n]['version'] : ', unlocked';
+            echo "  {$n}@{$v}  [{$in}{$pin}]\n";
         }
     }
     $regs = pyhp_pkg_registry_dirs();
@@ -669,13 +934,18 @@ function pyhp_pkg_main(array $args): int {
     switch ($sub) {
         case 'init':   return pyhp_pkg_init($rest);
         case 'add':    return pyhp_pkg_add($rest);
-        case 'install': return pyhp_pkg_add($rest);
+        case 'install': return pyhp_pkg_install($rest);
+        case 'update': return pyhp_pkg_update($rest);
         case 'remove': case 'rm': return pyhp_pkg_remove($rest);
         case 'list':   return pyhp_pkg_list();
         default:
             echo "usage: pyhp pkg <command>\n\n";
             echo "  init            create pyhp.json + src/ stub in this folder\n";
-            echo "  add <name>      install a package from the registry into vendor/\n";
+            echo "  add <name|url>  install a package: local registry, remote registry\n";
+            echo "                  (index.json), or a direct zip URL — into vendor/\n";
+            echo "  install         (re)install every dependency of pyhp.json, honouring\n";
+            echo "                  the pyhp.lock.json pins (exact source + sha256)\n";
+            echo "  update [name]   drop lock pins so the next install re-resolves\n";
             echo "  remove <name>   uninstall a package\n";
             echo "  list            show dependencies and registry availability\n";
             return 0;

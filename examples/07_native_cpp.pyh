@@ -1,7 +1,11 @@
 // PyHP — native C++ blocks: drop real C++ right into a .pyh file.
 // Run:  pyhp run examples/07_native_cpp.pyh
-// Or compile EVERYTHING (PyHP + the C++ below) to one native binary:
-//       pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_native && /tmp/pyhp_native
+// Every cpp export also fuses into a single native binary via
+//       pyhp build <file.pyh> --target native -o app && ./app
+// (the whole program must be class-free for --target native — the class
+//  in 06_helper.pyh means this particular example runs on the PHP engines;
+//  the list-bridge demo at the bottom is pure cpp + PyHP, so try moving it
+//  into its own file and going native).
 //
 // Exported functions are declared with a `// pyhp-export:` line. The bridge
 // supports int64_t, double and const char* — the classic C ABI.
@@ -49,3 +53,30 @@ echo "module + native = ", m.shout(pyh_mood(2)), "\n";
 echo "\n(The first native call compiles the cpp block once with g++, then\n";
 echo " every call afterwards is raw machine code. Try --target native to\n";
 echo " fuse PyHP and C++ into a single executable with zero PHP involved.)\n";
+
+// ---- lists cross the bridge too (0.6.0) ---------------------------
+cpp {
+    // pyhp-export: double pyh_mean(pyhp_list xs);
+    // pyhp-export: pyhp_list pyh_scaled(pyhp_list xs, int64_t k);
+    double pyh_mean(pyhp_list xs) {
+        if (xs.len == 0) return 0.0;
+        double s = 0.0;
+        for (int64_t i = 0; i < xs.len; i++) {
+            if (xs.items[i].kind == 1) s += (double)xs.items[i].i;  // kind: 1=int
+            if (xs.items[i].kind == 2) s += xs.items[i].f;          // 2=float
+        }                                                            // 3=string 0=null
+        return s / (double)xs.len;
+    }
+    pyhp_list pyh_scaled(pyhp_list xs, int64_t k) {
+        pyhp_list out;
+        out.len = xs.len;
+        out.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (xs.len > 0 ? xs.len : 1));
+        for (int64_t i = 0; i < xs.len; i++) {
+            pyhp_val pv; pv.kind = 1; pv.i = xs.items[i].i * k;
+            out.items[i] = pv;
+        }
+        return out;   // malloc'd items: PyHP copies, then calls pyhp_list_free
+    }
+}
+echo "list bridge mean   = ", pyh_mean([1, 2, 3, 4]), "\n";
+echo "list bridge scaled = ", pyh_scaled([1, 2, 3], 10), "\n";

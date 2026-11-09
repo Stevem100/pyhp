@@ -1,6 +1,6 @@
 {
     "language": "PyHP",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "tagline": "PHP syntax, Python brains, C muscles.",
     "fileExtension": ".pyh",
     "runtime": "PHP 8.0+ CLI, no extensions",
@@ -187,7 +187,8 @@
         "IndexError",
         "ZeroDivisionError",
         "MemError",
-        "RuntimeError"
+        "RuntimeError",
+        "StopIteration"
     ],
     "modules": {
         "form": "m = require(\"./lib.pyh\") | m = require(\"pkgname\")",

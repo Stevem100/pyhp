@@ -32,6 +32,14 @@ class PyHPInterpreter
             $r = $this->invokeMethodWithSuper($inst, $f, []);
             return is_string($r) ? $r : pyhp_tostr($r);
         };
+        $GLOBALS['__pyhp_iter_hook'] = function ($v): ?array {
+            if (!($v instanceof InterpInstance)) return null;
+            try {
+                return $this->interpIterate($v);
+            } catch (PyHPTypeError $e) {
+                return null;   // not iterable — let the caller report it
+            }
+        };
     }
 
     /* ================================================================ */
@@ -136,7 +144,7 @@ class PyHPInterpreter
         foreach ($classNames as $n) {
             $cls = $this->classes[$id . '\\' . $n] ?? null;
             if ($cls !== null) {
-                $exports[$n] = fn(...$a) => $this->instantiate($cls, $a);
+                $exports[$n] = new InterpClassRef($cls, $this);
             }
         }
         $table = new PyDict($exports);
@@ -196,7 +204,7 @@ class PyHPInterpreter
                 }
                 return;
             case 'Class':
-                $this->declareClass($s);
+                $this->declareClass($s, $env);
                 return;
             case 'If': {
                 foreach ($s['branches'] as [$cond, $body]) {
@@ -238,7 +246,8 @@ class PyHPInterpreter
                 return;
             }
             case 'Foreach': {
-                $items = pyhp_foreach($this->evalExpr($s['iter'], $env));
+                $itv = $this->evalExpr($s['iter'], $env);
+                $items = $itv instanceof InterpInstance ? $this->interpIterate($itv) : pyhp_foreach($itv);
                 foreach ($items as $k => $v) {
                     try {
                         if ($s['var2'] !== null) {
@@ -386,7 +395,7 @@ class PyHPInterpreter
     /* classes                                                          */
     /* ================================================================ */
 
-    private function declareClass(array $s): void {
+    private function declareClass(array $s, ?PyHPEnv $env = null): void {
         $name = $s['name'];
         $key = $this->clsKey($name);
         if (isset($this->classes[$key])) {
@@ -396,12 +405,19 @@ class PyHPInterpreter
         $cls->name = $name;
         if ($s['ext'] !== null) {
             $parent = $this->clsFind($s['ext']);
-            if ($parent === null) {
+            if ($parent !== null) {
+                // extending by class name is only allowed within the file's
+                // own namespace (or an error class)
+                if ($this->classNs !== '' && !isset($this->classes[$this->classNs . $s['ext']])
+                    && !array_key_exists($s['ext'], pyhp_error_class_map())) {
+                    throw new PyHPSyntaxError("line {$s['line']}: module classes cannot extend classes from other files");
+                }
+            } elseif ($env !== null && $env->has($s['ext']) && $env->get($s['ext']) instanceof InterpClassRef) {
+                // `extends SomeVar` — a class object held in a variable, e.g.
+                // S = require("./base.pyh").Shape; class Circle extends S
+                $parent = $env->get($s['ext'])->def;
+            } else {
                 throw new PyHPSyntaxError("line {$s['line']}: unknown parent class '{$s['ext']}'");
-            }
-            if ($this->classNs !== '' && !isset($this->classes[$this->classNs . $s['ext']])
-                && !array_key_exists($s['ext'], pyhp_error_class_map())) {
-                throw new PyHPSyntaxError("line {$s['line']}: module classes cannot extend classes from other files");
             }
             $cls->parent = $parent;
         }
@@ -437,7 +453,7 @@ class PyHPInterpreter
         return $chain;
     }
 
-    private function instantiate(ClassDef $cls, array $args, array $kwargs = []): InterpInstance {
+    public function instantiate(ClassDef $cls, array $args, array $kwargs = []): InterpInstance {
         $inst = new InterpInstance($cls);
         // property defaults: parent first, then child (in declaration order)
         foreach ($this->chainClasses($cls) as $c) {
@@ -462,6 +478,39 @@ class PyHPInterpreter
         $ctor = $this->findMethod($cls, '__construct') ?? $this->findMethod($cls, '__init');
         if ($ctor !== null) $this->invokeMethodWithSuper($inst, $ctor, $args, $kwargs);
         return $inst;
+    }
+
+    /** Iterator protocol for interpreter instances: __iter__() then
+     *  __next__() until a StopIteration raise ends the stream. */
+    private function interpIterate(InterpInstance $v): array {
+        $hasMethod = function (InterpInstance $inst, string $n): bool {
+            for ($c = $inst->cls; $c !== null; $c = $c->parent) {
+                if (isset($c->methods[$n])) return true;
+            }
+            return false;
+        };
+        $obj = $v;
+        if ($hasMethod($v, '__iter__')) {
+            $f = $this->findMethod($v->cls, '__iter__');
+            $obj = $this->invokeMethodWithSuper($v, $f, []);
+            if ($obj instanceof PyList) return $obj->a;
+            if (!($obj instanceof InterpInstance)) {
+                throw new PyHPTypeError('__iter__ must return an object or list');
+            }
+        }
+        if (!$hasMethod($obj, '__next__')) {
+            throw new PyHPTypeError("'" . pyhp_type_name($v) . "' object is not iterable");
+        }
+        $out = [];
+        try {
+            while (true) {
+                $f = $this->findMethod($obj->cls, '__next__');
+                $out[] = $this->invokeMethodWithSuper($obj, $f, []);
+            }
+        } catch (PyHPThrow $t) {
+            if (!pyhp_throw_is_stop($t)) throw $t;
+        }
+        return $out;
     }
 
     private function invokeMethodWithSuper(InterpInstance $inst, InterpFunc $f, array $args, array $kwargs = []) {
@@ -567,7 +616,9 @@ class PyHPInterpreter
             case 'FStr': {
                 $out = '';
                 foreach ($e['parts'] as $p) {
-                    $out .= $p[0] === 's' ? $p[1] : pyhp_tostr($this->evalExpr($p[1], $env));
+                    if ($p[0] === 's') { $out .= $p[1]; continue; }
+                    $v = $this->evalExpr($p[1], $env);
+                    $out .= isset($p[2]) ? pyhp_format($v, $p[2]) : pyhp_tostr($v);
                 }
                 return $out;
             }

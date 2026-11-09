@@ -650,6 +650,118 @@ clamp= 10  flags= [false, true]
 OUT
 ];
 
+$T[] = ['f-string format specs', <<<'CODE'
+x = 3.14159;
+n = 1234567;
+s = "hi";
+print(f"pi={x:.2f} sci={x:.3e}");
+print(f"[{n:>10}] [{n:012}] [{n:,}] [{n:*^11}]");
+print(f"pct={0.875:.1%} hex={255:#x} bin={5:#b}");
+print(f"[{s:<6}] [{s:.1}] [{65:c}]");
+print(f"neg={-42:06} pad={42:06,} sign={42:+d}");
+big = 12345.6789;
+print(f"g={big:.3g} short={big:.2}");
+print(f"keep ternary={n > 100 ? 'big' : 'small'}");
+lam = lambda q: q * 3;
+print(f"lambda={lam(4)}");
+print(f"slice ok={[1, 2, 3][0:2]}");
+CODE
+, "pi=3.14 sci=3.142e+00\n[   1234567] [000001234567] [1,234,567] [**1234567**]\npct=87.5% hex=0xff bin=0b101\n[hi    ] [h] [A]\nneg=-00042 pad=000,042 sign=+42\ng=1.23e+04 short=1.2e+04\nkeep ternary=big\nlambda=12\nslice ok=[1, 2]\n"];
+
+$T[] = ['module-level state', <<<'CODE'
+st = require("./st.pyh");
+print(st.bump());
+print(st.bump());
+print(st.read());
+st.reset(100);
+print(st.read());
+print(st.log());
+CODE
+, "1\n2\n2\n100\n[1, 2]\n", ['files' => [
+    'st.pyh' => <<<'LIB'
+var counter = 0;
+var seen = [];
+function bump() {
+    counter = counter + 1;
+    seen.append(counter);
+    return counter;
+}
+function read() {
+    return counter;
+}
+function reset(v) {
+    counter = v;
+}
+function log() {
+    return seen;
+}
+LIB
+]]];
+
+$T[] = ['cross-module class inheritance', <<<'CODE'
+B = require("./shapes.pyh").Shape;
+C = require("./circle.pyh").Circle;
+c = C(2.0);
+print(c.describe());
+print(isinstance(c, "Shape"), isinstance(c, "Circle"));
+print(c.area());
+CODE
+, "shape:circle r=2.0\ntrue true\n12.56636\n", ['files' => [
+    'shapes.pyh' => <<<'LIB'
+class Shape {
+    string name;
+    function __construct(string n) { this.name = n; }
+    function area() { return 0.0; }
+    function describe() { return "shape:" + this.name; }
+}
+LIB
+    , 'circle.pyh' => <<<'LIB'
+B = require("./shapes.pyh").Shape;
+class Circle extends B {
+    float r;
+    function __construct(float r) {
+        super.__construct("circle");
+        this.r = r;
+    }
+    function area() { return 3.14159 * this.r ** 2; }
+    function describe() { return super.describe() + " r=" + str(this.r); }
+}
+LIB
+]]];
+
+$T[] = ['iterator protocol (__iter__/__next__)', <<<'CODE'
+class Range {
+    int cur;
+    int stop;
+    function __construct(int stop) {
+        this.cur = 0;
+        this.stop = stop;
+    }
+    function __iter__() {
+        return this;
+    }
+    function __next__() {
+        if this.cur >= this.stop {
+            throw StopIteration("done");
+        }
+        this.cur = this.cur + 1;
+        return this.cur;
+    }
+}
+total = 0;
+foreach v in Range(4) {
+    total = total + v;
+}
+print("sum:", total);
+xs = [];
+foreach v in Range(3) {
+    xs.append(v * v);
+}
+print(xs);
+print(sorted(Range(3), reverse = true));
+CODE
+, "sum: 10\n[1, 4, 9]\n[3, 2, 1]\n"];
+
 /* ================================================================ */
 /* runners                                                          */
 /* ================================================================ */
@@ -797,6 +909,65 @@ try {
 }
 CODE
 , "55 [1, 2, 3] 3 3\n[4, 9] [2, 3] a1true\ncaught nope\n"],
+        ['native backend: lambdas & sorted key', <<<'CODE'
+xs = [3, 1, 2];
+f = lambda x: x * 2;
+print(f(21));
+print(map(lambda v: v + 1, [1, 2, 3]));
+print(filter(lambda v: v > 1, [1, 2, 3]));
+names = ["pear", "fig", "banana"];
+print(sorted(names, key = lambda w: len(w)));
+print(sorted(xs, reverse = true));
+d = 10;
+print((lambda y: y + d)(5));
+function apply(fn, v) {
+    return fn(v);
+}
+print(apply(lambda x: x ** 2, 7));
+print(f"formatted={3.14159:.2f} of={len(names)}");
+CODE
+, "42\n[2, 3, 4]\n[2, 3]\n['fig', 'pear', 'banana']\n[3, 2, 1]\n15\n49\nformatted=3.14 of=3\n"],
+        ['native backend: list bridge', <<<'CODE'
+cpp {
+    // pyhp-export: double pyh_mean(pyhp_list xs);
+    // pyhp-export: pyhp_list pyh_squares(pyhp_list xs);
+    // pyhp-export: int64_t pyh_count_kind(pyhp_list xs, int64_t want);
+
+    double pyh_mean(pyhp_list xs) {
+        if (xs.len == 0) return 0.0;
+        double s = 0.0;
+        for (int64_t i = 0; i < xs.len; i++) {
+            if (xs.items[i].kind == 1) s += (double)xs.items[i].i;
+            if (xs.items[i].kind == 2) s += xs.items[i].f;
+        }
+        return s / (double)xs.len;
+    }
+    pyhp_list pyh_squares(pyhp_list xs) {
+        pyhp_list out;
+        out.len = xs.len;
+        out.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (xs.len > 0 ? xs.len : 1));
+        for (int64_t i = 0; i < xs.len; i++) {
+            pyhp_val pv; pv.kind = 0; pv.i = 0; pv.f = 0; pv.s = nullptr;
+            if (xs.items[i].kind == 1) { pv.kind = 1; pv.i = xs.items[i].i * xs.items[i].i; }
+            out.items[i] = pv;
+        }
+        return out;   // ownership moves to PyHP (copied, then freed)
+    }
+    int64_t pyh_count_kind(pyhp_list xs, int64_t want) {
+        int64_t c = 0;
+        for (int64_t i = 0; i < xs.len; i++) {
+            if (xs.items[i].kind == want) c++;
+        }
+        return c;
+    }
+}
+print("mean:", pyh_mean([1, 2, 3, 4]));
+print("squares:", pyh_squares([1, 2, 3, 4]));
+print("strings:", pyh_count_kind(["a", 1, "bb", 2.5, null, "ccc"], 3));
+print("empty:", pyh_mean([]));
+print("floats:", pyh_mean([1.5, 2.5]));
+CODE
+, "mean: 2.5\nsquares: [1, 4, 9, 16]\nstrings: 3\nempty: 0.0\nfloats: 2.0\n"],
         ['native backend: cpp blocks', <<<'CODE'
 cpp {
     // pyhp-export: int64_t pyh_add3(int64_t a, int64_t b, int64_t c);

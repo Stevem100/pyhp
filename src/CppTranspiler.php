@@ -11,7 +11,8 @@
  *   pyhp build app.pyh --target native -o app       # emit + g++ -> executable
  *
  * v1 limitations (documented in docs/REFERENCE.md):
- *   - classes and lambda/function expressions are not supported yet
+ *   - lambdas capture enclosing values at creation (early binding);
+ *     classes are not supported yet
  *   - try/finally is not supported yet (try/catch is)
  *   - a few host builtins (md5, sha256, ...) are unavailable
  */
@@ -124,7 +125,8 @@ class PyHPCppTranspiler
                     break;
                 case 'Func':
                     if ($s['name'] === null) {
-                        $this->err('lambda/function expressions are not supported by the native backend yet', $s['line']);
+                        $this->w($L, $ind, $this->emitNativeLambda($s, $sc) . ';');
+                        break;
                     }
                     $this->modUnits[$this->curUnit]['funcs'][$s['name']] = true;
                     break;
@@ -232,7 +234,11 @@ class PyHPCppTranspiler
                 $this->collectExpr($e['value']);
                 break;
             case 'Func':
-                $this->err('lambda/function expressions are not supported by the native backend yet', $e['line']);
+                foreach ($e['params'] as $p) {
+                    if (($p['def'] ?? null) !== null) $this->collectExpr($p['def']);
+                }
+                $this->collectExprs($e['body']['stmts']);
+                break;
             case 'Var': case 'Num': case 'Str': case 'Bool': case 'Null': case 'This': case 'Super':
                 break;
         }
@@ -348,25 +354,29 @@ class PyHPCppTranspiler
             [$kinds, $ret] = self::sigKinds($e);
             $conv = [];
             $call = [];
+            $listIdx = [];
             for ($i = 0; $i < count($kinds); $i++) {
                 switch ($kinds[$i]) {
                     case 'i': $conv[] = "    int64_t a{$i} = pyhp_rt_to_i(A[{$i}], {$this->cppStr($name)});"; break;
                     case 'd': $conv[] = "    double a{$i} = pyhp_rt_to_d(A[{$i}], {$this->cppStr($name)});"; break;
                     case 's': $conv[] = "    std::string ss{$i} = pyhp_rt_to_s(A[{$i}], {$this->cppStr($name)});"; break;
+                    case 'l': $conv[] = "    pyhp_list a{$i} = pyhp_val_to_list(A[{$i}], " . $this->cppStr($name) . ");"; $listIdx[] = $i; break;
                 }
                 $call[] = $kinds[$i] === 's' ? "ss{$i}.c_str()" : "a{$i}";
             }
             $callStr = implode(', ', $call);
+            $freeLines = implode('', array_map(fn($i) => "    pyhp_list_free(&a{$i});\n", $listIdx));
             $L[] = '    if (name == ' . $this->cppStr($name) . ') {';
             if (count($kinds) > 0) {
                 $L[] = '        if (A.size() != ' . count($kinds) . ') pyhp_rt_throw("TypeError", std::string(' . $this->cppStr($name) . ') + "() wrong number of arguments");';
             }
             foreach ($conv as $c) { $L[] = $c; }
             switch ($ret) {
-                case 'i': $L[] = "        return Val::mk((int64_t){$name}({$callStr}));"; break;
-                case 'd': $L[] = "        return Val::mk((double){$name}({$callStr}));"; break;
-                case 's': $L[] = "        { const char* __r = {$name}({$callStr}); return Val::mk(std::string(__r ? __r : \"\")); }"; break;
-                default:  $L[] = "        {$name}({$callStr}); return Val::nul();";
+                case 'i': $L[] = "        int64_t __r = {$name}({$callStr});\n{$freeLines}        return Val::mk(__r);"; break;
+                case 'd': $L[] = "        double __r = {$name}({$callStr});\n{$freeLines}        return Val::mk(__r);"; break;
+                case 's': $L[] = "        { const char* __r = {$name}({$callStr}); std::string __s(__r ? __r : \"\"); {$freeLines} return Val::mk(__s); }"; break;
+                case 'l': $L[] = "        { pyhp_list __r = {$name}({$callStr}); Val __v = pyhp_list_to_val(__r); pyhp_list_free(&__r); {$freeLines} return __v; }"; break;
+                default:  $L[] = "        {$name}({$callStr});\n{$freeLines}        return Val::nul();";
             }
             $L[] = '    }';
         }
@@ -410,6 +420,9 @@ class PyHPCppTranspiler
 
     private function emitFunction(string $unit, array $s, array &$L): void {
         $label = $s['name'];
+        $savedParams = $this->curFnParams;
+        $this->curFnParams = [];
+        foreach ($s['params'] as $p) { $this->curFnParams[$p['name']] = true; }
         $nNamed = 0;
         $variadic = false;
         foreach ($s['params'] as $p) { if ($p['variadic']) $variadic = true; else $nNamed++; }
@@ -435,6 +448,7 @@ class PyHPCppTranspiler
         $this->emitStmts($s['body']['stmts'], 'env', $L, 1);
         $L[] = '    return Val::nul();';
         $L[] = '}';
+        $this->curFnParams = $savedParams;
     }
 
     private function emitModuleInit(string $unit, array $u, array &$L): void {
@@ -609,7 +623,11 @@ class PyHPCppTranspiler
                 return; // collected & emitted in the cpp section
             case 'Func':
                 if ($s['name'] !== null) return; // hoisted
-                $this->err('lambda/function expressions are not supported by the native backend yet', $s['line']);
+                foreach ($s['params'] as $p) {
+                    if (($p['def'] ?? null) !== null) $this->collectExpr($p['def']);
+                }
+                $this->collectExprs($s['body']['stmts']);
+                return;
             case 'Class':
                 $this->err('classes are not supported by the native backend yet — use the PHP engines', $s['line']);
         }
@@ -641,7 +659,11 @@ class PyHPCppTranspiler
             case 'FStr': {
                 $parts = [];
                 foreach ($e['parts'] as $p) {
-                    $parts[] = $p[0] === 's' ? 'std::string(' . $this->cppStr($p[1]) . ')' : 'pyhp_rt_tostr(' . $this->emitExpr($p[1], $sc) . ')';
+                    if ($p[0] === 's') { $parts[] = 'std::string(' . $this->cppStr($p[1]) . ')'; continue; }
+                    $inner = $this->emitExpr($p[1], $sc);
+                    $parts[] = isset($p[2])
+                        ? 'pyhp_rt_format(' . $inner . ', ' . $this->cppStr($p[2]) . ')'
+                        : 'pyhp_rt_tostr(' . $inner . ')';
                 }
                 return 'Val::mk(std::string(' . (implode(' + ', $parts) ?: '""') . '))';
             }
@@ -695,9 +717,141 @@ class PyHPCppTranspiler
             case 'Call':
                 return $this->emitCall($e, $sc);
             case 'Func':
-                $this->err('lambda/function expressions are not supported by the native backend yet', $e['line']);
+                return $this->emitNativeLambda($e, $sc);
         }
         $this->err("unsupported expression '{$e['k']}'", $e['line']);
+    }
+
+    /** Emit a lambda / anonymous function as a C++ PyFn closure. Enclosing
+     *  names are captured (by value) at creation time — early binding — which
+     *  keeps the closure safe to store and call after its defining frame ends. */
+    private function emitNativeLambda(array $e, string $sc): string {
+        $params = $e['params'];
+        $savedParams = $this->curFnParams;
+        $this->curFnParams = [];
+        foreach ($params as $p) { $this->curFnParams[$p['name']] = true; }
+        $bound = [];
+        foreach ($params as $p) { $bound[$p['name']] = true; }
+        $assigned = [];
+        $free = [];
+        $this->lambdaFreeNames($e['body']['stmts'], $bound, $assigned, $free);
+        $caps = [];
+        $decls = [];
+
+        foreach (array_keys($free) as $i => $n) {
+            $caps[] = "__c{$i} = {$sc}.get(" . $this->cppStr($n) . ")";
+            $decls[] = '__ls.declare(' . $this->cppStr($n) . ', __c' . $i . ');';
+        }
+        $L = [];
+        $L[] = 'PyScope __ls;';
+        $nNamed = count($params);
+        $L[] = 'if (__args.size() > ' . $nNamed . ') pyhp_rt_throw("TypeError", std::string("<lambda>() takes ' . $nNamed . ' argument(s), ") + std::to_string(__args.size()) + " given");';
+        foreach ($params as $i => $p) {
+            $L[] = '__ls.declare(' . $this->cppStr($p['name']) . ', __args.size() > ' . $i . ' ? __args[' . $i . '] : Val::nul());';
+        }
+        foreach ($decls as $d) { $L[] = $d; }
+        $this->emitStmts($e['body']['stmts'], '__ls', $L, 0);
+        $this->curFnParams = $savedParams;
+        $inner = implode("\n", $L);
+        return 'Val::mk(PyFn([' . implode(', ', $caps) . '](std::vector<Val>& __args) -> Val {' . "\n" . $inner . "\n}))";
+    }
+
+    /** Free names of a lambda body: read, not a parameter, and not assigned
+     *  inside the body. Assignment makes a name lambda-local (like the
+     *  interpreter's env.assign). Nested lambdas are walked with their own
+     *  params added so their reads count against the outer scope too. */
+    private function lambdaFreeNames(array $stmts, array $bound, array &$assigned, array &$free): void {
+        foreach ($stmts as $s) {
+            switch ($s['k']) {
+                case 'Expr': $this->lambdaFreeExpr($s['e'], $bound, $assigned, $free); break;
+                case 'VarDecl':
+                    if ($s['init'] !== null) $this->lambdaFreeExpr($s['init'], $bound, $assigned, $free);
+                    $assigned[$s['name']] = true; break;
+                case 'Return': if ($s['e'] !== null) $this->lambdaFreeExpr($s['e'], $bound, $assigned, $free); break;
+                case 'Throw': $this->lambdaFreeExpr($s['e'], $bound, $assigned, $free); break;
+                case 'If':
+                    foreach ($s['branches'] as [$cond, $body]) {
+                        $this->lambdaFreeExpr($cond, $bound, $assigned, $free);
+                        $this->lambdaFreeNames($body['stmts'], $bound, $assigned, $free);
+                    }
+                    if ($s['else'] !== null) $this->lambdaFreeNames($s['else']['stmts'], $bound, $assigned, $free);
+                    break;
+                case 'While': case 'DoWhile':
+                    $this->lambdaFreeExpr($s['cond'], $bound, $assigned, $free);
+                    $this->lambdaFreeNames($s['body']['stmts'], $bound, $assigned, $free);
+                    break;
+                case 'For':
+                    if ($s['init'] !== null) $this->lambdaFreeExpr($s['init']['e'] ?? $s['init'], $bound, $assigned, $free);
+                    if ($s['cond'] !== null) $this->lambdaFreeExpr($s['cond'], $bound, $assigned, $free);
+                    if ($s['update'] !== null) $this->lambdaFreeExpr($s['update'], $bound, $assigned, $free);
+                    $this->lambdaFreeNames($s['body']['stmts'], $bound, $assigned, $free);
+                    break;
+                case 'Foreach':
+                    $this->lambdaFreeExpr($s['iter'], $bound, $assigned, $free);
+                    $assigned[$s['var1']] = true;
+                    if ($s['var2'] !== null) $assigned[$s['var2']] = true;
+                    $this->lambdaFreeNames($s['body']['stmts'], $bound, $assigned, $free);
+                    break;
+                case 'Try':
+                    $this->lambdaFreeNames($s['body']['stmts'], $bound, $assigned, $free);
+                    foreach ($s['catches'] as $c) {
+                        if (($c['var'] ?? null) !== null) $assigned[$c['var']] = true;
+                        $this->lambdaFreeNames($c['body']['stmts'], $bound, $assigned, $free);
+                    }
+                    break;
+                case 'Func': // nested lambda: its params bound for the inner walk
+                    $inner = $bound;
+                    foreach ($s['params'] as $p) { $inner[$p['name']] = true; }
+                    $this->lambdaFreeNames($s['body']['stmts'], $inner, $assigned, $free);
+                    break;
+            }
+        }
+    }
+
+    private function lambdaFreeExpr(array $e, array $bound, array &$assigned, array &$free): void {
+        switch ($e['k']) {
+            case 'Var':
+                if (!isset($bound[$e['name']]) && !isset($assigned[$e['name']])) $free[$e['name']] = true;
+                break;
+            case 'Assign':
+                if ($e['target']['k'] === 'Var') $assigned[$e['target']['name']] = true;
+                $this->lambdaFreeExpr($e['target'], $bound, $assigned, $free);
+                $this->lambdaFreeExpr($e['value'], $bound, $assigned, $free);
+                break;
+            case 'Post':
+                $this->lambdaFreeExpr($e['e'], $bound, $assigned, $free);
+                break;
+            case 'List': foreach ($e['items'] as $i) { $this->lambdaFreeExpr($i, $bound, $assigned, $free); } break;
+            case 'Dict': foreach ($e['pairs'] as [$k, $v]) { $this->lambdaFreeExpr($k, $bound, $assigned, $free); $this->lambdaFreeExpr($v, $bound, $assigned, $free); } break;
+            case 'Bin': $this->lambdaFreeExpr($e['l'], $bound, $assigned, $free); $this->lambdaFreeExpr($e['r'], $bound, $assigned, $free); break;
+            case 'Un': $this->lambdaFreeExpr($e['e'], $bound, $assigned, $free); break;
+            case 'Ternary': $this->lambdaFreeExpr($e['c'], $bound, $assigned, $free); $this->lambdaFreeExpr($e['a'], $bound, $assigned, $free); $this->lambdaFreeExpr($e['b'], $bound, $assigned, $free); break;
+            case 'Idx': $this->lambdaFreeExpr($e['obj'], $bound, $assigned, $free); $this->lambdaFreeExpr($e['idx'], $bound, $assigned, $free); break;
+            case 'Slice':
+                $this->lambdaFreeExpr($e['obj'], $bound, $assigned, $free);
+                foreach (['start', 'stop', 'step'] as $p) { if ($e[$p] !== null) $this->lambdaFreeExpr($e[$p], $bound, $assigned, $free); }
+                break;
+            case 'Member': $this->lambdaFreeExpr($e['obj'], $bound, $assigned, $free); break;
+            case 'FStr': foreach ($e['parts'] as $p) { if ($p[0] === 'e') $this->lambdaFreeExpr($p[1], $bound, $assigned, $free); } break;
+            case 'Comp':
+                $this->lambdaFreeExpr($e['iter'], $bound, $assigned, $free);
+                if ($e['key'] !== null) $this->lambdaFreeExpr($e['key'], $bound, $assigned, $free);
+                $this->lambdaFreeExpr($e['val'], $bound, $assigned, $free);
+                if ($e['cond'] !== null) $this->lambdaFreeExpr($e['cond'], $bound, $assigned, $free);
+                break;
+            case 'Call':
+                // a Var callee resolves by name at call time (builtin / unit
+                // function / scope callable) — it is not a value read
+                if ($e['callee']['k'] !== 'Var') $this->lambdaFreeExpr($e['callee'], $bound, $assigned, $free);
+                foreach ($e['args'] as $a) { $this->lambdaFreeExpr($a, $bound, $assigned, $free); }
+                foreach (($e['kwargs'] ?? []) as $kw) { $this->lambdaFreeExpr($kw['expr'], $bound, $assigned, $free); }
+                break;
+            case 'Func':
+                $inner = $bound;
+                foreach ($e['params'] as $p) { $inner[$p['name']] = true; }
+                $this->lambdaFreeNames($e['body']['stmts'], $inner, $assigned, $free);
+                break;
+        }
     }
 
     private function emitComp(array $e, string $sc): string {
@@ -810,8 +964,9 @@ class PyHPCppTranspiler
 
     private function emitCall(array $e, string $sc): string {
         $callee = $e['callee'];
-        if (!empty($e['kwargs'])) {
-            $this->err('keyword arguments are not supported by the native backend yet — pass positional arguments', $e['line']);
+        $kws = $e['kwargs'] ?? [];
+        if (count($kws) > 0 && !($callee['k'] === 'Var' && in_array($callee['name'], self::NATIVE_BUILTINS, true))) {
+            $this->err('keyword arguments are not supported by the native backend for user functions — pass positional arguments', $e['line']);
         }
         $args = '{' . implode(', ', array_map(fn($a) => $this->emitExpr($a, $sc), $e['args'])) . '}';
         if ($callee['k'] === 'Super') {
@@ -833,12 +988,17 @@ class PyHPCppTranspiler
                 return $this->fnCName($this->curUnitEmit, $name) . "({$args})";
             }
             if (in_array($name, self::NATIVE_BUILTINS, true)) {
+                if (count($kws) > 0) {
+                    $kwn = implode(', ', array_map(fn($kw) => $this->cppStr($kw['name']), $kws));
+                    $kwv = implode(', ', array_map(fn($kw) => $this->emitExpr($kw['expr'], $sc), $kws));
+                    return 'pyhp_rt_call_kw(' . $this->cppStr($name) . ", {$args}, std::vector<std::string>{{$kwn}}, std::vector<Val>{{$kwv}})";
+                }
                 return 'pyhp_rt_call(' . $this->cppStr($name) . ", {$args})";
             }
             if (isset($this->cppExports[$name])) {
                 return 'pyhp_rt_native(' . $this->cppStr($name) . ", {$args})";
             }
-            if (isset($this->modUnits[$this->curUnitEmit]['assigned'][$name])) {
+            if (isset($this->curFnParams[$name]) || isset($this->modUnits[$this->curUnitEmit]['assigned'][$name])) {
                 return "pyhp_rt_callfn({$sc}.get(" . $this->cppStr($name) . "), {$args})";
             }
             $this->err("undefined function '{$name}' (native backend knows unit functions, stdlib builtins and cpp exports)", $e['line']);
@@ -856,6 +1016,8 @@ class PyHPCppTranspiler
 
     /** Unit currently being emitted (set around unit emission). */
     private string $curUnitEmit = 'main';
+    /** Params of the function currently being emitted (callable via scope). */
+    private array $curFnParams = [];
 
     /* ================================================================ */
     /* the embedded C++ runtime                                         */
@@ -902,6 +1064,7 @@ struct Val {
     static Val mk(bool v) { Val x; x.k = BO; x.b = v; return x; }
     static Val mk(const std::string& v) { Val x; x.k = ST; x.s = std::make_shared<std::string>(v); return x; }
     static Val mklist() { Val x; x.k = LI; x.li = std::make_shared<std::vector<Val>>(); return x; }
+    static Val mk(std::function<Val(std::vector<Val>&)> v) { Val x; x.k = FN; x.fn = std::make_shared<std::function<Val(std::vector<Val>&)>>(std::move(v)); x.et = "<lambda>"; return x; }
     static Val mkdict() { Val x; x.k = DI; x.di = std::make_shared<std::vector<std::pair<std::string, Val>>>(); return x; }
 };
 using PyFn = std::function<Val(std::vector<Val>&)>;
@@ -1043,6 +1206,190 @@ static std::string pyhp_rt_tostr(const Val& v) {
         case Val::ER: return *v.s;
     }
     return "unknown";
+}
+
+/* ---------------- f-string format specs (mirror of pyhp_format) -------- */
+static std::string pyhp_rt_group_digits(const std::string& d) {
+    std::string out; int c = 0;
+    for (size_t i = d.size(); i-- > 0;) {
+        out += d[i];
+        if (++c % 3 == 0 && i > 0 && isdigit((unsigned char)d[i - 1])) out += ',';
+    }
+    std::reverse(out.begin(), out.end());
+    return out;
+}
+
+static std::string pyhp_rt_fix_exp(std::string s) {
+    for (size_t i = 0; i + 2 < s.size(); i++) {
+        if ((s[i] == 'e' || s[i] == 'E') && (s[i+1] == '+' || s[i+1] == '-') && isdigit((unsigned char)s[i+2])) {
+            if (i + 3 >= s.size() || !isdigit((unsigned char)s[i+3])) s.insert(i + 2, 1, '0');
+        }
+    }
+    return s;
+}
+
+static std::string pyhp_rt_utf8_chr(int cp) {
+    std::string o;
+    if (cp < 0x80) o += (char)cp;
+    else if (cp < 0x800) { o += (char)(0xC0 | (cp >> 6)); o += (char)(0x80 | (cp & 0x3F)); }
+    else if (cp < 0x10000) { o += (char)(0xE0 | (cp >> 12)); o += (char)(0x80 | ((cp >> 6) & 0x3F)); o += (char)(0x80 | (cp & 0x3F)); }
+    else { o += (char)(0xF0 | (cp >> 18)); o += (char)(0x80 | ((cp >> 12) & 0x3F)); o += (char)(0x80 | ((cp >> 6) & 0x3F)); o += (char)(0x80 | (cp & 0x3F)); }
+    return o;
+}
+
+static std::string pyhp_rt_format_g(double v, int p, bool lower) {
+    if (std::isinf(v) || std::isnan(v)) {
+        std::string s = v > 0 ? "inf" : (std::isnan(v) ? "nan" : "-inf");
+        if (!lower) for (auto& c : s) c = (char)toupper((unsigned char)c);
+        return s;
+    }
+    if (v == 0.0) return "0";
+    int exp = (int)std::floor(std::log10(std::fabs(v)));
+    if (exp < -4 || exp >= p) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "%.*e", p - 1, v);
+        std::string body(buf);
+        if (!lower) for (auto& c : body) if (c == 'e') c = 'E';
+        size_t e = body.find(lower ? 'e' : 'E');
+        std::string mant = body.substr(0, e);
+        size_t last = mant.find_last_not_of('0');
+        if (last != std::string::npos && mant[last] == '.') last--;
+        mant = mant.substr(0, last + 1);
+        return mant + body.substr(e);
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.*f", std::max(0, p - 1 - exp), v);
+    std::string body(buf);
+    if (body.find('.') != std::string::npos) {
+        size_t last = body.find_last_not_of('0');
+        if (last != std::string::npos && body[last] == '.') last--;
+        body = body.substr(0, last + 1);
+    }
+    return body;
+}
+
+static std::string pyhp_rt_pad(const std::string& s, long width, char fill, char align) {
+    if (width <= (long)s.size()) return s;
+    long total = width - (long)s.size();
+    if (align == '>') { std::string p; for (long i = 0; i < total; i++) p += fill; return p + s; }
+    if (align == '<') { std::string p; for (long i = 0; i < total; i++) p += fill; return s + p; }
+    long left = total / 2, right = total - left;
+    std::string pl, pr;
+    for (long i = 0; i < left; i++) pl += fill;
+    for (long i = 0; i < right; i++) pr += fill;
+    return pl + s + pr;
+}
+
+static std::string pyhp_rt_format(const Val& v, const std::string& spec) {
+    size_t p = 0;
+    char fill = ' ', align = 0;
+    if (spec.size() >= 2 && (spec[1] == '<' || spec[1] == '>' || spec[1] == '^')) { fill = spec[0]; align = spec[1]; p = 2; }
+    else if (!spec.empty() && (spec[0] == '<' || spec[0] == '>' || spec[0] == '^')) { align = spec[0]; p = 1; }
+    char signC = '-';
+    if (p < spec.size() && (spec[p] == '+' || spec[p] == '-' || spec[p] == ' ')) signC = spec[p++];
+    bool alt = false;
+    if (p < spec.size() && spec[p] == '#') { alt = true; p++; }
+    bool zero = false;
+    if (p < spec.size() && spec[p] == '0') { zero = true; p++; }
+    long width = 0; bool grp = false;
+    size_t ws = p;
+    while (p < spec.size() && (isdigit((unsigned char)spec[p]) || spec[p] == ',')) p++;
+    if (p > ws) {
+        std::string w = spec.substr(ws, p - ws);
+        grp = w.find(',') != std::string::npos;
+        w.erase(std::remove(w.begin(), w.end(), ','), w.end());
+        if (!w.empty()) width = std::atoll(w.c_str());
+    }
+    int prec = -1;
+    if (p < spec.size() && spec[p] == '.') {
+        p++; prec = 0;
+        while (p < spec.size() && isdigit((unsigned char)spec[p])) { prec = prec * 10 + (spec[p] - '0'); p++; }
+    }
+    char type = 0;
+    if (p < spec.size()) type = spec[p++];
+    if (p != spec.size()) pyhp_rt_throw("Error", "invalid format spec '" + spec + "'");
+
+    std::string body;
+    bool strish = (type == 's' || type == 'c' || (type == 0 && v.k != Val::IN && v.k != Val::FL));
+    if (strish) {
+        if (type == 'c') {
+            if (v.k == Val::IN) {
+                int64_t cp = v.i;
+                if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) pyhp_rt_throw("Error", "invalid code point for format type c");
+                body = pyhp_rt_utf8_chr((int)cp);
+            } else {
+                std::string s = pyhp_rt_tostr(v);
+                if (s.empty()) pyhp_rt_throw("Error", "cannot format an empty string with type c");
+                body = s.substr(0, 1);
+            }
+        } else {
+            body = pyhp_rt_tostr(v);
+            if (prec >= 0 && (type == 's' || type == 0) && (size_t)prec < body.size()) body = body.substr(0, prec);
+        }
+        if (align == 0) align = '<';
+    } else {
+        if (v.k != Val::IN && v.k != Val::FL && v.k != Val::BO) pyhp_rt_throw("TypeError", "unsupported value for format spec '" + spec + "'");
+        double f = v.k == Val::IN ? (double)v.i : (v.k == Val::BO ? (v.b ? 1.0 : 0.0) : v.f);
+        double af = std::fabs(f);
+        bool neg = f < 0 || (f == 0 && pyhp_rt_num_str(f)[0] == '-');
+        std::string prefix;
+        if (type == 'd' || (type == 0 && v.k == Val::IN)) {
+            if (v.k == Val::FL) pyhp_rt_throw("TypeError", "unknown format code 'd' for float — use :f or :g");
+            body = std::to_string(v.i < 0 ? -v.i : v.i);
+        } else if (type == 'b' || type == 'o' || type == 'x' || type == 'X') {
+            if (grp) pyhp_rt_throw("Error", std::string("cannot use ',' with format type '") + type + "'");
+            unsigned long long u = (unsigned long long)llround(std::fabs(v.k == Val::IN ? (double)v.i : f));
+            char buf[80];
+            if (type == 'b') {
+                std::string d;
+                if (u == 0) d = "0";
+                while (u) { d += (char)('0' + (u & 1ULL)); u >>= 1; }
+                std::reverse(d.begin(), d.end());
+                body = d;
+            } else if (type == 'o') { std::snprintf(buf, sizeof(buf), "%llo", u); body = buf; }
+            else if (type == 'x') { std::snprintf(buf, sizeof(buf), "%llx", u); body = buf; }
+            else { std::snprintf(buf, sizeof(buf), "%llX", u); body = buf; }
+            if (alt) prefix = type == 'b' ? "0b" : (type == 'o' ? "0o" : (type == 'X' ? "0X" : "0x"));
+        } else if (type == 'f' || type == 'F') {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "%.*f", prec < 0 ? 6 : prec, af);
+            body = buf;
+            if (type == 'f' && (body.find("INF") != std::string::npos || body.find("NAN") != std::string::npos)) {
+                for (auto& c : body) c = (char)tolower((unsigned char)c);
+            }
+        } else if (type == 'e' || type == 'E') {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "%.*e", prec < 0 ? 6 : prec, af);
+            body = buf;
+            char want = type == 'e' ? 'e' : 'E', other = type == 'e' ? 'E' : 'e';
+            for (auto& c : body) if (c == other) c = want;
+        } else if (type == 'g' || type == 'G' || (type == 0 && v.k == Val::FL && prec >= 0)) {
+            body = pyhp_rt_format_g(af, prec < 0 ? 6 : std::max(1, prec), type != 'G');
+            if (type == 'G') for (auto& c : body) c = (char)toupper((unsigned char)c);
+        } else if (type == '%') {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf), "%.*f", prec < 0 ? 6 : prec, af * 100.0);
+            body = std::string(buf) + "%";
+        } else {
+            body = pyhp_rt_num_str(af);
+        }
+        std::string signStr = neg ? "-" : (signC == '+' ? "+" : (signC == ' ' ? " " : ""));
+        if (zero && align == 0 && width > 0) {
+            size_t dr = 0;
+            while (dr < body.size() && isdigit((unsigned char)body[dr])) dr++;
+            long avail = width - (long)signStr.size() - (long)prefix.size() - (long)(body.size() - dr);
+            if ((long)dr < avail) body.insert(0, (size_t)(avail - dr), '0');
+        }
+        if (grp) {
+            size_t dr = 0;
+            while (dr < body.size() && isdigit((unsigned char)body[dr])) dr++;
+            body = pyhp_rt_group_digits(body.substr(0, dr)) + body.substr(dr);
+        }
+        body = signStr + prefix + body;
+        if (align == 0) align = '>';
+    }
+    if (width > 0 && (long)body.size() < width) body = pyhp_rt_pad(body, width, fill, align);
+    return body;
 }
 static std::string pyhp_rt_repr(const Val& v) {
     if (v.k == Val::ST) return pyhp_rt_repr_str(*v.s);
@@ -1402,6 +1749,36 @@ static Val pyhp_rt_wrapfn(const std::string& name, PyFn f) {
     v.fn = std::make_shared<PyFn>(std::move(f));
     v.et = name;
     return v;
+}
+static Val pyhp_rt_callfn(const Val& f, std::vector<Val> args);
+static Val pyhp_rt_call_kw(const std::string& name, std::vector<Val> A,
+                           const std::vector<std::string>& KN, const std::vector<Val>& KV) {
+    if (name == "sorted") {
+        if (A.size() != 1) pyhp_rt_throw("TypeError", "sorted() takes exactly 1 positional argument (" + std::to_string(A.size()) + " given)");
+        bool rev = false; bool hasKey = false; Val key;
+        for (size_t i = 0; i < KN.size(); i++) {
+            if (KN[i] == "reverse") rev = pyhp_rt_truthy(KV[i]);
+            else if (KN[i] == "key") { hasKey = true; key = KV[i]; }
+            else pyhp_rt_throw("TypeError", "sorted() got an unexpected keyword argument '" + KN[i] + "'");
+        }
+        std::vector<Val> out = pyhp_rt_itervals(A[0]);
+        if (hasKey) {
+            std::vector<std::pair<Val, Val>> dec;
+            dec.reserve(out.size());
+            for (auto& v : out) dec.push_back({pyhp_rt_callfn(key, {v}), v});
+            std::stable_sort(dec.begin(), dec.end(), [](const std::pair<Val, Val>& x, const std::pair<Val, Val>& y) {
+                return pyhp_rt_cmp(x.first, y.first, "<") < 0;
+            });
+            out.clear();
+            for (auto& p : dec) out.push_back(p.second);
+        } else {
+            std::stable_sort(out.begin(), out.end(), [](const Val& x, const Val& y) { return pyhp_rt_cmp(x, y, "<") < 0; });
+        }
+        if (rev) std::reverse(out.begin(), out.end());
+        return pyhp_rt_list(std::move(out));
+    }
+    pyhp_rt_throw("TypeError", name + "() accepts positional arguments only");
+    return Val::nul();
 }
 static Val pyhp_rt_callfn(const Val& f, std::vector<Val> args) {
     if (f.k == Val::FN) return (*f.fn)(args);
@@ -2312,6 +2689,54 @@ static std::string pyhp_rt_to_s(const Val& v, const std::string& fn) {
     if (v.k == Val::ST) return *v.s;
     pyhp_rt_throw("TypeError", fn + "() expects a string (const char*) argument, got " + pyhp_rt_type_name(v));
     return "";
+}
+
+/* ---------------- pyhp_list bridge (flat int/float/string/null items) --- */
+enum PyHpVKind : unsigned char { PYHP_VN = 0, PYHP_VI = 1, PYHP_VF = 2, PYHP_VS = 3 };
+struct pyhp_val { unsigned char kind; int64_t i; double f; const char* s; };
+struct pyhp_list { int64_t len; pyhp_val* items; };
+
+/* Convert a PyHP list value into C-bridge form. String items are strdup'd —
+ * bridge lists own their strings; release with pyhp_list_free(). */
+static pyhp_list pyhp_val_to_list(const Val& v, const char* fn) {
+    if (v.k != Val::LI) pyhp_rt_throw("TypeError", std::string(fn) + "() expects a list (pyhp_list) argument");
+    pyhp_list L;
+    L.len = (int64_t)v.li->size();
+    L.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (size_t)(L.len > 0 ? L.len : 1));
+    for (int64_t i = 0; i < L.len; i++) {
+        const Val& e = (*v.li)[(size_t)i];
+        pyhp_val pv; pv.kind = PYHP_VN; pv.i = 0; pv.f = 0.0; pv.s = nullptr;
+        if (e.k == Val::IN) { pv.kind = PYHP_VI; pv.i = e.i; }
+        else if (e.k == Val::FL) { pv.kind = PYHP_VF; pv.f = e.f; }
+        else if (e.k == Val::ST) { pv.kind = PYHP_VS; pv.s = strdup(e.s->c_str()); }   // bridge lists own their strings
+        L.items[i] = pv;
+    }
+    return L;
+}
+
+/* Materialise a C-bridge list (returned by a cpp export) as a PyHP list.
+ * Strings are copied; then the C-side memory can be released. */
+static Val pyhp_list_to_val(const pyhp_list& L) {
+    Val out = Val::mklist();
+    for (int64_t i = 0; i < L.len; i++) {
+        const pyhp_val& p = L.items[i];
+        if (p.kind == PYHP_VI) out.li->push_back(Val::mk(p.i));
+        else if (p.kind == PYHP_VF) out.li->push_back(Val::mk(p.f));
+        else if (p.kind == PYHP_VS) out.li->push_back(Val::mk(std::string(p.s ? p.s : "")));
+        else out.li->push_back(Val::nul());
+    }
+    return out;
+}
+
+/* Release list memory allocated by the bridge (malloc'd items + strdup'd
+ * strings — the ownership contract for lists a cpp export returns). */
+static void pyhp_list_free(pyhp_list* L) {
+    if (!L->items) return;
+    for (int64_t i = 0; i < L->len; i++) {
+        if (L->items[i].kind == PYHP_VS && L->items[i].s != nullptr) std::free((void*)L->items[i].s);
+    }
+    std::free(L->items);
+    L->items = nullptr;
 }
 CPP;
     }

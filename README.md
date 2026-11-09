@@ -1,4 +1,4 @@
-# PyHP 0.5.0
+# PyHP 0.6.0
 
 [![CI](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml/badge.svg)](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml)
 
@@ -19,9 +19,21 @@ PyHP ships with **three execution paths** built from the same front-end:
 2. **A transpiler** — PyHP → clean, standalone PHP 8 source (`pyhp build` / `pyhp compile`) that runs natively and requires only `src/runtime.php`.
 3. **A native C++ backend** — PyHP → single-file C++17 → machine code (`pyhp build --target cpp|native`). Your embedded `cpp { ... }` blocks go straight into the binary: no PHP, no interpreter, no FFI.
 
-All paths share the exact same data model, so the 37-case test suite passes every program through the engines and asserts byte-identical output.
+All paths share the exact same data model, so the 43-case test suite passes every program through the engines and asserts byte-identical output.
 
-New in 0.5.0: **keyword arguments** — call functions, methods and constructors
+New in 0.6.0: **f-string format specs** — `f"pi={x:.2f}"`, `f"[{n:>10}]"`,
+`f"{n:,}"`, `f"{p:.1%}"` and the full Python mini-language, byte-identical on
+all three engines. **Modules now carry state and classes across files**:
+module-level vars work in compiled mode, `class X extends S` where
+`S = require("./m.pyh").Cls` just works, and `isinstance` sees through
+namespaces. **`pyhp pkg` goes remote**: `pkg add` accepts registry names,
+remote `index.json` registries or direct zip URLs, and every install is
+pinned in **`pyhp.lock.json`** (exact source + sha256) with `pkg install` /
+`pkg update` for reproducible vendor trees. **`pyhp_list` crosses the C++
+bridge** (cpp blocks take and return lists), **lambdas run in the native
+backend** (with `sorted(key = ...)`), and classes can implement
+**`__iter__` / `__next__`** so `foreach`, `sorted` and `map` consume custom
+iterators. New in 0.5.0: **keyword arguments** — call functions, methods and constructors
 with `name = value` arguments (Python style): `greet(name = "Ada")`,
 `sorted(xs, key = f, reverse = true)`, `super(x, sound = "Woof")` — in the
 interpreter and the transpiler alike. Windows now installs to **`C:\pyhp` by
@@ -343,13 +355,15 @@ primary     = INT | FLOAT | STRING | FSTRING | "true" | "false" | "null" | ident
 
 ## Roadmap
 
-* class exports across modules + module-level state in compiled mode
-* classes and lambdas in the native C++ backend (currently PHP-engine only)
-* list/float types across the C++ bridge (currently int64_t/double/const char*)
-* string interpolation format specs (`{x:.2f}`)
-* lazy generators (`range`, `map`) and iterator protocol
-* remote registry (HTTP) for `pyhp pkg add`, lockfiles
-* bytecode VM for the interpreter path, big-int arithmetic
+0.6.0 cleared six of the seven open items (format specs, module state in
+compiled mode, cross-module class exports, the remote registry + lockfile,
+lists across the C++ bridge, native lambdas, the iterator protocol). What
+remains:
+
+* classes in the native C++ backend (needs a heap-scoped class model; lambdas landed in 0.6.0)
+* lazy generators (`yield`) and lazy `range`/`map` views — the iterator protocol (`__iter__`/`__next__`) landed in 0.6.0, but sequences stay eager
+* dicts across the C++ bridge (lists landed in 0.6.0)
+* bytecode VM for the interpreter path, big-int arithmetic (gmp is available in the bundled PHP build when we pick this up)
 
 ## License
 

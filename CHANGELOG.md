@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.6.0 — the roadmap sprint: format specs, modules, bridge, iterators
+
+**F-string format specs (`{x:.2f}`)**
+- The Python format mini-language works inside any f-string expression:
+  `[[fill]align][sign][#][0][width][,][.precision][type]` — `f"pi={x:.2f}"`,
+  `f"[{n:>10}]"`, `f"{n:012}"`, `f"{n:,}"`, `f"{p:.1%}"`, `f"{v:#x}"`,
+  `f"{s:.1}"`, `f"{65:c}"`, `f"{big:.3g}"`.
+- Types: `d b o x X f F e E g G n % s c` (and none), fill/align/sign/`#`/
+  zero-pad/thousands/precision all supported; identical bytes from the
+  interpreter, the transpiler and the native backend.
+- Colons that belong to ternaries (`a ? b : c`) or lambda bodies
+  (`lambda x: ...`) never start a spec; slices and dict literals are safe.
+- Invalid specs fail at parse time: `invalid format spec '…'`.
+
+**Modules carry state and classes across files**
+- Module-level `var`s now work in **compiled mode** (they were broken:
+  module functions saw uninitialized variables). The interpreter's
+  write-through semantics are preserved: functions and methods read and
+  assign module state, late binding included.
+- `class X extends S` where `S = require("./mod.pyh").Cls` — cross-module
+  inheritance works on both engines, `super(...)` and property types along
+  the chain included. The interpreter exports module classes as real
+  first-class class values.
+- `isinstance(obj, "Name")` sees through module namespaces and inheritance
+  on both engines.
+- The compile of a module happens on demand, so `extends` resolves parents
+  even when the class statement runs before the require in emission order.
+
+**`pyhp pkg` goes remote + lockfile**
+- `pyhp pkg add <name|url>` — local registries, then remote registries
+  (`pyhp.json` "registries" or `PYHP_REGISTRY=http…`), then a direct zip
+  URL. Remote registries serve `index.json` mapping packages to versions,
+  zip URLs and sha256 checksums; downloads are verified.
+- **`pyhp.lock.json`** — every successful add pins `{version, source,
+  sha256}`. `pyhp pkg install` (re)installs the manifest's dependencies
+  honouring the lock (exact source + checksum, vendor tamper detection);
+  `pyhp pkg update [name]` unpins for re-resolution; `pkg remove` cleans up.
+
+**`pyhp_list` across the C++ bridge**
+- cpp-block exports can take and return **lists**: `pyhp_list` carries flat
+  int / float / string / null items (`xs.len`, `xs.items[i].kind` ∈
+  1=int 2=float 3=str 0=null). Works in the native backend and the exec
+  helper identically; the FFI path reports that it cannot marshal structs.
+- Lists a cpp export returns must malloc `items` (and `strdup` strings);
+  PyHP copies on receipt and calls `pyhp_list_free` — the ownership
+  contract is documented in REFERENCE.md.
+
+**Lambdas in the native backend**
+- `lambda x: expr` (and anonymous `function` expressions) compile to real
+  C++ closures. Free names are captured **by value at creation** (early
+  binding) so closures are safe to store and call after their defining
+  frame ends — the PHP engines keep late binding; the difference is
+  documented. Calling function-typed parameters now works natively too.
+- `sorted(xs, key = f, reverse = true)` — the 0.5.0 headline — now runs on
+  all three engines (decorate-sort-undecorate, stable).
+
+**Iterator protocol**
+- Classes can define `__iter__()` (returning `this` or an iterator) and
+  `__next__()` (raising `StopIteration` at the end); `foreach`, `sorted`,
+  `map`, `filter`, `list(...)` and friends consume them. Works identically
+  in the interpreter and compiled mode. `StopIteration` is a proper error
+  class you can throw and catch.
+
+**Docs, tests, tooling**
+- Test suite: 43 cases (was 37), all byte-identical across engines.
+- REFERENCE.md documents the format mini-language, the iterator protocol,
+  the list bridge ABI, cross-module rules and the lockfile format; the AI
+  kit (`ai/`) is regenerated from the live engine.
+
+
 ## 0.5.0 — keyword arguments, Windows installs to `C:\pyhp`
 
 **Keyword arguments (Python style)**

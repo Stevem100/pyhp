@@ -1,4 +1,4 @@
-# PyHP 0.5.0 — Complete Reference
+# PyHP 0.6.0 — Complete Reference
 
 **PHP syntax. Python brains. C muscles.**
 
@@ -103,6 +103,7 @@ declared without a value is `null`.
 | float | `3.14`, `2e3` |
 | string | `"double"`, `'single'`, escapes `\n \t \r \\ \0 \' \"` |
 | f-string | `f"hi {name}, 1+1={1 + 1}, {{escaped}}"` — full expressions inside `{}` |
+| format spec | `f"pi={x:.2f}"`, `f"[{n:>10}]"`, `f"{n:,}"`, `f"{p:.1%}"` — Python mini-language: `[[fill]align][sign][#][0][width][,][.precision][type]`; types `d b o x X f F e E g G n % s c`; a `:` after a ternary or `lambda` never starts a spec; invalid specs fail at parse time |
 | bool | `true`, `false` |
 | null | `null` |
 | list | `[1, "two", [3]]` — Python aliasing semantics (reference values) |
@@ -201,8 +202,27 @@ isinstance(d, "Dog"); // true — walks the inheritance chain
 - String hook: `__str__` (or `__toString`).
 - `super.method(...)` / `super(...)` call the parent implementation.
 - Property type annotations are enforced on every assignment.
-- The 8 built-in error classes (below) behave like normal classes; you can
+- The 9 built-in error classes (below) behave like normal classes; you can
   extend them (`class HttpError extends Exception {...}`).
+- **Iterator protocol**: define `__iter__()` (return `this` or an iterator
+  object) and `__next__()` (raise/throw `StopIteration` when exhausted) and
+  your objects work with `foreach`, `sorted`, `map`, `filter`, `list(...)`
+  and `sum(...)`:
+
+```c
+class CountUp {
+    int cur = 0;
+    int stop;
+    function __construct(int stop) { this.stop = stop; }
+    function __iter__() { return this; }
+    function __next__() {
+        if this.cur >= this.stop { throw StopIteration("done"); }
+        this.cur = this.cur + 1;
+        return this.cur;
+    }
+}
+foreach n in CountUp(3) { print(n); }   // 1 2 3
+```
 
 ## 9. Errors, try/catch/finally
 
@@ -240,11 +260,17 @@ pkg  = require("mathx");           // vendor/ then registry package
 - The export table supports dot-access for calls and reads: `m.fn(x)`, `m.value`.
   Elements are also reachable by index: `m["fn"](x)`.
 - Circular requires raise `circular module dependency`.
-- Module classes cannot extend classes from other files (keep inheritance inside
-  one module); they can extend built-in error classes.
-- Recommendation: keep modules **stateless** (pure functions). Module-level
-  variables are visible to module functions in the interpreter but not in
+- **Module-level state works everywhere**: `var` assignments at a module's top
+  level are visible to (and writable from) its functions and methods — with
+  the interpreter's write-through semantics — in the interpreter *and* in
   compiled mode.
+- **Cross-module inheritance**: `S = require("./base.pyh").Shape;
+  class Circle extends S { ... }` works on both engines (put the `require`
+  before the class); `super(...)` and property types resolve along the chain.
+  Extending a class by *name* stays file-local; extending built-in error
+  classes by name works anywhere.
+- `isinstance(obj, "Name")` walks the whole chain, including classes that
+  came from other modules.
 
 Resolution order for a package name `name`:
 1. `./vendor/name/` (manifest `main`, then `src/name.pyh`, `main.pyh`, `name.pyh`)
@@ -272,15 +298,38 @@ A project is a folder with `pyhp.json`:
 | Command | Effect |
 | --- | --- |
 | `pyhp pkg init [name]` | create `pyhp.json` + `src/<name>.pyh` stub |
-| `pyhp pkg add mathx` | copy the package from the registry into `vendor/`, record it in `dependencies` |
+| `pyhp pkg add mathx` | install into `vendor/` (local registry first), record in `dependencies`, pin in the lockfile |
 | `pyhp pkg add mathx@1.0.0` | same, with a version check |
-| `pyhp pkg remove mathx` | remove from `dependencies` and delete `vendor/mathx` |
-| `pyhp pkg list` | show project, dependencies, install state, registry catalog |
+| `pyhp pkg add https://host/pkg.zip[#sha256=…]` | install a package zip from a URL (checksum verified when given) |
+| `pyhp pkg install` | (re)install every dependency of `pyhp.json`, honouring `pyhp.lock.json` pins (exact source + sha256, vendor tamper detection) |
+| `pyhp pkg update [name]` | drop lock pins so the next `install` re-resolves |
+| `pyhp pkg remove mathx` | remove from `dependencies`, `vendor/` and the lockfile |
+| `pyhp pkg list` | show project, dependencies (locked versions), install state, registry catalog |
+
+**Remote registries**: list base URLs in `pyhp.json` (`"registries":
+["https://example.com/pyhp-registry"]`) or export `PYHP_REGISTRY=https://…`.
+A registry serves `index.json`:
+
+```json
+{"packages": {"mathx": {"1.0.0": {"url": "https://…/mathx-1.0.0.zip", "sha256": "…"}}}}
+```
+
+`pkg add` picks the highest version (or the `@version` you ask for),
+downloads the zip, verifies the sha256, and installs it.
+
+**Lockfile** (`pyhp.lock.json`) — written automatically on every `add`:
+
+```json
+{"lock": 1, "packages": {"mathx": {"version": "1.0.0", "source": "https://…", "sha256": "…"}}}
+```
+
+Commit it for reproducible vendor trees: `pkg install` reinstalls from the
+exact pinned source and refuses checksum mismatches.
 
 **Publishing**: a package is any folder with `pyhp.json` and an entry `.pyh`
-file whose top-level functions/lambdas/classes are its public API. Add it to a
-registry (the bundled `registry/` folder, a shared folder via `PYHP_REGISTRY`,
-or a fork of this repo) — that's the whole process.
+file whose top-level functions/lambdas/classes are its public API. Zip it
+(`pyhp.json` at the zip root or one folder below) and either add it to a
+local registry folder, a remote `index.json`, or hand out the URL.
 
 ## 12. Built-in functions (all 62)
 
@@ -434,15 +483,20 @@ Callables stored in a dict are also dot-callable: `ops = {"twice": lambda s: s +
 
 ## 17. Engine parity
 
-The test suite (`php tests/run_tests.php`, 35 cases) executes every program on
+The test suite (`php tests/run_tests.php`, 43 cases) executes every program on
 both PHP engines (plus the native backend where g++ exists) and requires
 byte-identical output. The only known divergences:
 
 | Case | Interpreter | Compiled |
 | --- | --- | --- |
 | `require()` with a computed (non-literal) spec | works | compile-time error — use a literal |
-| module functions reading module-level variables | works | not supported — keep modules stateless |
 | `catch` of a class defined in another module | matches by name | falls back to generic catch |
+
+Deliberate native-backend differences (documented, not bugs): lambdas capture
+enclosing values **by value at creation** (early binding) while the PHP
+engines bind late; `sorted(key = …, reverse = …)` is the only builtin that
+takes keyword arguments natively; user-function kwargs and classes are
+native-unsupported with clear errors.
 
 ## 18. C++ native blocks — `cpp { ... }`
 
@@ -468,6 +522,40 @@ Rules:
   `pyh_mymod_func`.
 - Argument/return kinds are fixed by the `pyhp-export` declaration; passing a
   float where `int64_t` is declared raises `TypeError`.
+- **Lists cross the bridge**: declare a parameter or return as `pyhp_list`.
+  It carries flat int / float / string / null items:
+
+```c
+cpp {
+    // pyhp-export: double pyh_mean(pyhp_list xs);
+    // pyhp-export: pyhp_list pyh_squares(pyhp_list xs);
+    double pyh_mean(pyhp_list xs) {
+        double s = 0.0;
+        for (int64_t i = 0; i < xs.len; i++) {
+            if (xs.items[i].kind == 1) s += (double)xs.items[i].i;   // 1=int
+            if (xs.items[i].kind == 2) s += xs.items[i].f;           // 2=float
+        }
+        return xs.len ? s / (double)xs.len : 0.0;
+    }
+    pyhp_list pyh_squares(pyhp_list xs) {
+        pyhp_list out;
+        out.len = xs.len;
+        out.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (xs.len > 0 ? xs.len : 1));
+        for (int64_t i = 0; i < xs.len; i++) {
+            pyhp_val pv; pv.kind = 1; pv.i = xs.items[i].i * xs.items[i].i;
+            out.items[i] = pv;
+        }
+        return out;   // ownership moves to PyHP
+    }
+}
+```
+
+  Item kinds: `1` int (`int64_t i`), `2` float (`double f`), `3` string
+  (`const char* s`), `0` null. A list a cpp export *returns* must malloc
+  `items` (and `strdup` any strings) — PyHP copies on receipt and then calls
+  `pyhp_list_free(&L)`; lists *passed in* stay valid for the duration of the
+  call and are freed by the runtime afterwards. Works in the native backend
+  and the exec helper; the FFI bridge reports that it cannot marshal structs.
 - Compilation is lazy (first call), cached in `./.pyhp_native/` (override with
   `PYHP_NATIVE_CACHE`), and needs a C++ compiler (`g++`, `clang++` or `c++`;
   override with `CXX`).
@@ -498,9 +586,15 @@ stdlib, `cpp { ... }` blocks, and most builtins (`print len range map filter
 sorted sum abs min max sqrt round chr ord hex bin json_parse json_string
 base64e/base64d urlenc/urldec sha256 file_read/file_write argv exit time ...`).
 
+New in 0.6.0: **lambdas / anonymous function expressions compile to real C++
+closures** (free names are captured by value at creation — early binding),
+function-typed parameters are callable, and `sorted(xs, key = f, reverse =
+true)` accepts its keyword arguments (decorate-sort-undecorate, stable).
+
 Not yet in the native backend (clear compile errors — use the PHP engines):
-classes & `super`, lambdas/function expressions, `try/finally`, `md5`/`crc32`,
-`exec`/`system`/`env`/`sleep`/`input`/`malloc_arena`, `isinstance` of classes.
+classes & `super`, keyword arguments on user functions, `try/finally`,
+`md5`/`crc32`, `exec`/`system`/`env`/`sleep`/`input`/`malloc_arena`,
+`isinstance` of classes.
 Dict keys are stored with an internal marker (int and string keys stay
 distinct); string keys beginning with `\x01` are reserved.
 

@@ -68,3 +68,10 @@ print("split:", "a,b,c".split(","));
 print("join:", "-".join(["py", "hp"]));
 print("replace/find:", "hello world".replace("world", "PyHP"), "hello PyHP".find("PyHP"));
 print("contains:", "PyHP".contains("HP"), " startswith:", "PyHP".startswith("Py"));
+
+// f-string format specs (Python's mini-language, byte-identical everywhere)
+pi = 3.14159;
+big = 1234567;
+print(f"pi={pi:.2f}  sci={pi:.3e}  pct={0.875:.1%}");
+print(f"[{big:>10}] [{big:012}] [{big:,}]");
+print(f"[{'hi':<6}] [{255:#x}] [{65:c}]");

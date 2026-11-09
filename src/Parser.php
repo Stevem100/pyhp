@@ -743,12 +743,54 @@ class PyHPParser
         $out = [];
         foreach ($parts as $p) {
             if ($p[0] === 's') { $out[] = ['s', $p[1]]; continue; }
-            $sub = (new PyHPLexer($p[1]))->tokenize();
+            [$exprRaw, $spec] = $this->splitFormatSpec($p[1], $line);
+            $sub = (new PyHPLexer($exprRaw))->tokenize();
             $subParser = new PyHPParser($sub);
             $e = $subParser->parseExpression();
             if (!$subParser->at('EOF')) $subParser->err('unexpected token inside f-string expression');
-            $out[] = ['e', $e];
+            $out[] = $spec === null ? ['e', $e] : ['e', $e, $spec];
         }
         return ['k' => 'FStr', 'parts' => $out, 'line' => $line];
+    }
+
+    /** The f-string format spec grammar (shared with pyhp_format in runtime.php). */
+    private const SPEC_RE = '/^(?:(?<fill>.)?(?<align>[<>^]))?(?<sign>[+\- ]?)(?<alt>#)?(?<zero>0)?(?<width>\d[\d,]*|,)?(?:\.(?<prec>\d+))?(?<type>[bcdeEfFgGnosxX%])?$/';
+
+    /** Split '{expr:spec}' at the first top-level ':' — unless that colon
+     *  closes a ternary '?' branch or heads a lambda body, which take the
+     *  colon first. Slices and dict literals sit inside brackets, so their
+     *  colons are never at the top level. */
+    private function splitFormatSpec(string $raw, int $line): array {
+        $n = strlen($raw); $depth = 0; $tern = 0; $lamHead = false; $inStr = null;
+        for ($i = 0; $i < $n; $i++) {
+            $c = $raw[$i];
+            if ($inStr !== null) {
+                if ($c === '\\') { $i++; continue; }
+                if ($c === $inStr) $inStr = null;
+                continue;
+            }
+            if ($c === '"' || $c === "'") { $inStr = $c; continue; }
+            if ($c === '(' || $c === '[' || $c === '{') { $depth++; continue; }
+            if ($c === ')' || $c === ']' || $c === '}') { if ($depth > 0) $depth--; continue; }
+            if ($depth > 0) continue;
+            if ($c === '?') { $tern++; continue; }
+            if ($c === ':') {
+                if ($tern > 0) { $tern--; continue; }         // closes a ternary branch
+                if ($lamHead) { $lamHead = false; continue; } // lambda body colon
+                $spec = trim(substr($raw, $i + 1));
+                if (!preg_match(self::SPEC_RE, $spec)) {
+                    throw new PyHPSyntaxError("line {$line}: invalid format spec '{$spec}'");
+                }
+                return [substr($raw, 0, $i), $spec];
+            }
+            if (ctype_alpha($c) || $c === '_') {
+                $j = $i;
+                while ($j < $n && (ctype_alnum($raw[$j]) || $raw[$j] === '_')) $j++;
+                if (substr($raw, $i, $j - $i) === 'lambda') $lamHead = true;
+                $i = $j - 1;
+                continue;
+            }
+        }
+        return [$raw, null];
     }
 }

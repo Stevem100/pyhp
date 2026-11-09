@@ -18,7 +18,11 @@ class PyHPTranspiler
 {
     private array $classNames = [];      // PyHP name => ['ext' => ?name]  (main file)
     private array $topFuncs = [];        // top-level function names         (main file)
-    private array $scopeStack = [];      // each: ['assigned' => string[], 'types' => [name=>type]]
+    private array $scopeStack = [];      // each: ['assigned' => string[], 'types' => [name=>type], 'local' => [name=>true]]
+    private array $unitVars = [];        // ns => [name => true]: unit-level (top-level) variable names
+    private array $varClass = [];        // ns => [varName => [requireSpec, className]]
+    private array $unitTypes = [];       // ns => [name => type]: declared types of unit-level vars
+    private bool $atUnitTop = true;      // emitting unit top-level statements (not inside a function)
     private int $tmpN = 0;
     private int $indent = 0;
     private string $outFile;
@@ -77,6 +81,8 @@ class PyHPTranspiler
         $L[] = '';
         $prologue = count($L);
         $this->scopeStack = [['assigned' => [], 'types' => []]];
+        $this->unitVars[''] = $this->collectUnitVars($stmts);
+        $this->atUnitTop = true;
         foreach ($stmts as $s) { $this->emitStmt($s, $L); }
         if (count($this->pendingMods) > 0) {
             array_splice($L, $prologue, 0, $this->pendingMods);
@@ -182,6 +188,37 @@ class PyHPTranspiler
         $scope = $this->curScope();
         return $scope['assigned'];
     }
+    private function markLocal(string $name): void {
+        $scope = &$this->curScope();
+        $scope['local'][$name] = true;
+    }
+    /** Is $name a unit-level variable visible here (not shadowed by a
+     *  parameter or local declaration in an enclosing function scope)? */
+    private function isUnitVar(string $name): bool {
+        if (!isset($this->unitVars[$this->ns][$name])) return false;
+        foreach ($this->scopeStack as $sc) {
+            if (isset($sc['local'][$name])) return false;
+        }
+        return true;
+    }
+    /** Compiled read expression for a unit var in a module unit, or null.
+     *  Main-unit vars need no rewrite (a `global` declaration is injected). */
+    private function unitVarRead(string $name): ?string {
+        if ($this->ns === '' || !$this->isUnitVar($name)) return null;
+        return 'pyhp_unit_get(' . var_export(rtrim($this->ns, '_'), true) . ', ' . var_export($name, true) . ')';
+    }
+    /** Compiled write target for a unit var in a module unit, or null. */
+    private function unitVarWrite(string $name): ?string {
+        if ($this->ns === '' || !$this->isUnitVar($name)) return null;
+        return "\$GLOBALS['__pyhp_unit_" . rtrim($this->ns, '_') . "']['{$name}']";
+    }
+    /** `global $a, $b;` declaration for the main unit's top-level vars. */
+    private function globalDecl(array $skip): ?string {
+        if ($this->ns !== '') return null;
+        $names = array_diff(array_keys($this->unitVars[''] ?? []), $skip);
+        if (count($names) === 0) return null;
+        return 'global ' . implode(', ', array_map(fn($n) => '$' . $n, $names)) . ';';
+    }
     private function setVarType(string $name, string $type): void {
         $scope = &$this->curScope();
         if ($type !== null && $type !== 'var') $scope['types'][$name] = $type;
@@ -281,12 +318,16 @@ class PyHPTranspiler
             }
             case 'Foreach': {
                 $iter = $this->emitExpr($s['iter']);
+                $r1 = $this->unitVarWrite($s['var1']) ?? "\${$s['var1']}";
                 if ($s['var2'] !== null) {
+                    $r2 = $this->unitVarWrite($s['var2']) ?? "\${$s['var2']}";
                     $this->markAssigned($s['var1']); $this->markAssigned($s['var2']);
-                    $this->w($L, "foreach (pyhp_foreach({$iter}) as \${$s['var1']} => \${$s['var2']}) {");
+                    if (!$this->atUnitTop) { $this->markLocal($s['var1']); $this->markLocal($s['var2']); }
+                    $this->w($L, "foreach (pyhp_foreach({$iter}) as {$r1} => {$r2}) {");
                 } else {
                     $this->markAssigned($s['var1']);
-                    $this->w($L, "foreach (pyhp_foreach({$iter}) as \${$s['var1']}) {");
+                    if (!$this->atUnitTop) $this->markLocal($s['var1']);
+                    $this->w($L, "foreach (pyhp_foreach({$iter}) as {$r1}) {");
                 }
                 $this->indent++;
                 $this->emitStmt($s['body'], $L);
@@ -335,11 +376,114 @@ class PyHPTranspiler
         throw new PyHPSyntaxError("line {$s['line']}: unsupported statement '{$s['k']}' in compiled mode");
     }
 
+    /** Static pass: every variable assigned at the unit's top level (module
+     *  state). Walks top-level control flow but never enters functions or
+     *  classes — those have their own scopes. */
+    private function collectUnitVars(array $stmts): array {
+        $names = [];
+        $walk = function (array $ss) use (&$walk, &$names): void {
+            foreach ($ss as $s) {
+                switch ($s['k']) {
+                    case 'VarDecl':
+                        $names[$s['name']] = true;
+                        if ($s['init'] !== null) $this->collectClassBinding($s['name'], $s['init']);
+                        break;
+                    case 'Expr':
+                        if ($s['e']['k'] === 'Assign' && $s['e']['op'] === '=' && $s['e']['target']['k'] === 'Var') {
+                            $this->collectClassBinding($s['e']['target']['name'], $s['e']['value']);
+                        }
+                        $this->collectVarTargets($s['e'], $names); break;
+                    case 'If':
+                        foreach ($s['branches'] as [$cond, $body]) { $walk($body['stmts']); }
+                        if ($s['else'] !== null) $walk($s['else']['stmts']);
+                        break;
+                    case 'While': case 'DoWhile':
+                        $walk($s['body']['stmts']); break;
+                    case 'For':
+                        if ($s['init'] !== null) {
+                            if ($s['init']['k'] === 'VarDecl') $names[$s['init']['name']] = true;
+                            elseif ($s['init']['k'] === 'Expr') $this->collectVarTargets($s['init']['e'], $names);
+                        }
+                        if ($s['update'] !== null) { $this->collectVarTargets($s['update'], $names); }
+                        $walk($s['body']['stmts']); break;
+                    case 'Foreach':
+                        $names[$s['var1']] = true;
+                        if ($s['var2'] !== null) $names[$s['var2']] = true;
+                        $walk($s['body']['stmts']); break;
+                    case 'Try':
+                        $walk($s['body']['stmts']);
+                        foreach ($s['catches'] as $c) { $walk($c['body']['stmts']); }
+                        break;
+                }
+            }
+        };
+        $walk($stmts);
+        return $names;
+    }
+
+    /** Expression-level assignment targets (a = .., i++, for-updates). */
+    private function collectVarTargets(array $e, array &$names): void {
+        switch ($e['k']) {
+            case 'Assign':
+                if ($e['target']['k'] === 'Var') $names[$e['target']['name']] = true;
+                $this->collectVarTargets($e['value'], $names);
+                break;
+            case 'Post':
+                if ($e['e']['k'] === 'Var') $names[$e['e']['name']] = true;
+                break;
+            case 'Bin':
+                if ($e['op'] === ',') { $this->collectVarTargets($e['l'], $names); $this->collectVarTargets($e['r'], $names); }
+                break;
+        }
+    }
+
+    /** Record `S = require("spec").Cls` — a class imported from another
+     *  module, usable as a parent in `class X extends S`. */
+    private function collectClassBinding(string $var, array $value): void {
+        if ($value['k'] !== 'Member' || $value['obj']['k'] !== 'Call') return;
+        $call = $value['obj'];
+        if (($call['callee']['k'] ?? '') !== 'Var' || $call['callee']['name'] !== 'require') return;
+        if (count($call['args']) !== 1 || $call['args'][0]['k'] !== 'Str') return;
+        $this->varClass[$this->ns][$var] = [$call['args'][0]['v'], $value['name']];
+    }
+
+    /** Resolve a var-held parent class (from `S = require(...).Cls`) to the
+     *  compiled PHP class name of the module that exports it. */
+    private function resolveVarClassParent(string $var, int $line): ?string {
+        if (!isset($this->varClass[$this->ns][$var])) return null;
+        [$spec, $clsName] = $this->varClass[$this->ns][$var];
+        $base = $this->sourceDir ?? (getcwd() ?: '.');
+        $path = pyhp_resolve_module($spec, $base);
+        if ($path === null) {
+            throw new PyHPSyntaxError("line {$line}: ModuleNotFoundError: cannot find module '{$spec}'");
+        }
+        $modId = $this->compileModule($path, $spec, $line);   // compiles on demand
+        $modNs = $modId . '_';
+        if (!isset($this->modClasses[$modNs][$clsName])) {
+            throw new PyHPSyntaxError("line {$line}: module '{$spec}' does not export a class named '{$clsName}'");
+        }
+        return $modNs . $clsName;
+    }
+
     private function emitVarDecl(array $s, array &$L): void {
         $name = $s['name'];
         $this->markAssigned($name);
         $type = $s['type'];
         $this->setVarType($name, $type);
+        $this->unitTypes[$this->ns][$name] = $type;
+        if (!$this->atUnitTop) $this->markLocal($name);
+        if ($this->atUnitTop && $this->ns !== '') {
+            // module-level state lives in the unit's GLOBALS bucket so the
+            // module's plain PHP functions can read and write it
+            $ref = $this->unitVarWrite($name);
+            if ($s['init'] !== null) {
+                $v = $this->emitExpr($s['init']);
+                $this->w($L, $this->typedWrap($ref, $v, $type, $name) . ';');
+            } else {
+                $this->w($L, "{$ref} = null;");
+            }
+            return;
+        }
         if ($s['init'] !== null) {
             $v = $this->emitExpr($s['init']);
             $this->w($L, $this->typedWrap("\${$name}", $v, $type, $name) . ';');
@@ -361,6 +505,16 @@ class PyHPTranspiler
             $name = $s['name'];
             $this->markAssigned($name);
             $this->setVarType($name, $s['type']);
+            $this->unitTypes[$this->ns][$name] = $s['type'];
+            if (!$this->atUnitTop) $this->markLocal($name);
+            if ($this->atUnitTop && $this->ns !== '') {
+                $ref = $this->unitVarWrite($name);
+                if ($s['init'] !== null) {
+                    $v = $this->emitExpr($s['init']);
+                    return rtrim($this->typedWrap($ref, $v, $s['type'], $name), ';');
+                }
+                return "{$ref} = null";
+            }
             if ($s['init'] !== null) {
                 $v = $this->emitExpr($s['init']);
                 return rtrim($this->typedWrap("\${$name}", $v, $s['type'], $name), ';');
@@ -402,17 +556,19 @@ class PyHPTranspiler
         if ($t['k'] === 'Var') {
             $name = $t['name'];
             $this->markAssigned($name);
-            $type = $this->varType($name);
+            $ref = $this->unitVarWrite($name);
+            $type = $this->varType($name) ?? ($ref !== null ? ($this->unitTypes[$this->ns][$name] ?? null) : null);
+            $varExpr = $ref ?? "\${$name}";
             if ($op === '=') {
                 $v = $this->emitExpr($e['value']);
-                return $this->typedWrapWithoutSemi("\${$name}", $v, $type, $name);
+                return $this->typedWrapWithoutSemi($varExpr, $v, $type, $name);
             }
             $v = $this->emitExpr($e['value']);
             if ($type !== null && $type !== 'var') {
-                $expr = $this->compoundExpr($op, "\${$name}", $v);
-                return "\${$name} = pyhp_check_type({$expr}, '{$type}', '{$name}')";
+                $expr = $this->compoundExpr($op, $varExpr, $v);
+                return "{$varExpr} = pyhp_check_type({$expr}, '{$type}', '{$name}')";
             }
-            return $this->compoundAssign($op, "\${$name}", $v);
+            return $this->compoundAssign($op, $varExpr, $v);
         }
         if ($t['k'] === 'Idx') {
             $obj = $this->emitExpr($t['obj']);
@@ -481,7 +637,8 @@ class PyHPTranspiler
     private function emitPost(array $e): string {
         $name = $e['e']['name'];
         $this->markAssigned($name);
-        return "\${$name}" . $e['op'];
+        $ref = $this->unitVarWrite($name);
+        return ($ref ?? "\${$name}") . $e['op'];
     }
 
     /* ---------------- try / throw ---------------- */
@@ -588,6 +745,7 @@ class PyHPTranspiler
             }
             if ($p['type'] !== null && $p['type'] !== 'var') $this->setVarType($p['name'], $p['type']);
             $this->markAssigned($p['name']);
+            $this->markLocal($p['name']);
             $i++;
         }
     }
@@ -596,12 +754,17 @@ class PyHPTranspiler
         $this->w($L, 'function ' . $this->fnPhp($s['name']) . '(' . $this->emitParamList($s['params']) . ') {');
         $this->indent++;
         $this->pushScope();
+        $gd = $this->globalDecl($this->paramNames($s['params']));
+        if ($gd !== null) { $this->w($L, $gd); }
         $prevRet = $this->curRet;
         $prevLabel = $this->curFnLabel;
         $this->curRet = $s['ret'];
         $this->curFnLabel = $s['name'];
+        $savedTop = $this->atUnitTop;
+        $this->atUnitTop = false;
         $this->emitPrologue($s['params'], $s['name'], $L);
         $this->emitStmt($s['body'], $L);
+        $this->atUnitTop = $savedTop;
         if ($s['ret'] !== null) {
             $this->w($L, "return pyhp_check_type(null, '{$s['ret']}', '{$s['name']}() return');");
         }
@@ -622,8 +785,12 @@ class PyHPTranspiler
 
     private function emitClosure(array $s, array $extraSelfRefs = []): string {
         // captures: everything assigned so far minus this function's own params
+        // and minus unit-level vars (those resolve via `global` / the unit bucket)
         $params = $this->paramNames($s['params']);
-        $captures = array_values(array_diff($this->assignedSoFar(), $params, $extraSelfRefs));
+        $captures = array_values(array_diff(
+            $this->assignedSoFar(), $params, $extraSelfRefs,
+            array_keys($this->unitVars[$this->ns] ?? [])
+        ));
         $useParts = array_map(fn($c) => '&$' . $c, $captures);
         foreach ($extraSelfRefs as $r) { $useParts[] = '&$' . $r; }
         $use = count($useParts) > 0 ? ' use (' . implode(', ', $useParts) . ')' : '';
@@ -634,8 +801,13 @@ class PyHPTranspiler
         $prevLabel = $this->curFnLabel;
         $this->curRet = $s['ret'];
         $this->curFnLabel = $label;
+        $savedTop = $this->atUnitTop;
+        $this->atUnitTop = false;
+        $gd = $this->globalDecl($params);
+        if ($gd !== null) { $this->w($body, $gd); }
         $this->emitPrologue($s['params'], $label, $body);
         foreach ($s['body']['stmts'] as $st) { $this->emitStmt($st, $body); }
+        $this->atUnitTop = $savedTop;
         if ($s['ret'] !== null) {
             $this->w($body, "return pyhp_check_type(null, '{$s['ret']}', '{$label}() return');");
         }
@@ -658,12 +830,16 @@ class PyHPTranspiler
                 $ext = ' extends ' . $this->clsPhp($s['ext']);
             } elseif (isset($map[$s['ext']])) {
                 $ext = ' extends ' . $map[$s['ext']];
+            } elseif (($parentPhp = $this->resolveVarClassParent($s['ext'], $s['line'])) !== null) {
+                // `class X extends S` where S = require("mod.pyh").Cls
+                $ext = ' extends PyHP_' . $parentPhp;
             } elseif ($this->ns !== '') {
                 throw new PyHPSyntaxError("line {$s['line']}: module classes cannot extend classes from other files");
             }
         }
         $this->w($L, "class {$phpName}{$ext} {");
         $this->indent++;
+        $this->w($L, 'const PYHP_CLASS = ' . var_export($name, true) . ';');
         $this->curClass = $name;
 
         $ctorBody = [];
@@ -743,12 +919,17 @@ class PyHPTranspiler
         $this->w($L, 'public function ' . $m['name'] . '(' . $this->emitParamList($m['params']) . ') {');
         $this->indent++;
         $this->pushScope();
+        $gd = $this->globalDecl($this->paramNames($m['params']));
+        if ($gd !== null) { $this->w($L, $gd); }
         $prevRet = $this->curRet;
         $prevLabel = $this->curFnLabel;
         $this->curRet = $m['ret'];
         $this->curFnLabel = $m['name'];
+        $savedTop = $this->atUnitTop;
+        $this->atUnitTop = false;
         $this->emitPrologue($m['params'], $m['name'], $L);
         foreach ($m['body']['stmts'] as $st) { $this->emitStmt($st, $L); }
+        $this->atUnitTop = $savedTop;
         if ($m['ret'] !== null) {
             $this->w($L, "return pyhp_check_type(null, '{$m['ret']}', '{$m['name']}() return');");
         }
@@ -776,7 +957,11 @@ class PyHPTranspiler
             case 'FStr': {
                 $parts = [];
                 foreach ($e['parts'] as $p) {
-                    $parts[] = $p[0] === 's' ? var_export($p[1], true) : 'pyhp_tostr(' . $this->emitExpr($p[1]) . ')';
+                    if ($p[0] === 's') { $parts[] = var_export($p[1], true); continue; }
+                    $inner = $this->emitExpr($p[1]);
+                    $parts[] = isset($p[2])
+                        ? 'pyhp_format(' . $inner . ', ' . var_export($p[2], true) . ')'
+                        : 'pyhp_tostr(' . $inner . ')';
                 }
                 return '(' . (implode(' . ', $parts) ?: "''") . ')';
             }
@@ -793,6 +978,8 @@ class PyHPTranspiler
                     && !in_array($e['name'], $this->curScope()['assigned'], true)) {
                     return "pyhp_cpp_fn(" . var_export($e['name'], true) . ")";
                 }
+                $unitRead = $this->unitVarRead($e['name']);
+                if ($unitRead !== null) return $unitRead;
                 return '$' . $e['name'];
             case 'This':
                 return '$this';
@@ -928,8 +1115,16 @@ class PyHPTranspiler
         if ($path === null) {
             throw new PyHPSyntaxError("line {$e['line']}: ModuleNotFoundError: cannot find module '{$spec}' (looked in ./vendor and the registry)");
         }
+        $id = $this->compileModule($path, $spec, $e['line']);
+        return 'pyhp_module_' . $id . '()';
+    }
+
+    /** Compile a module unit once (cached by realpath). Registering the id
+     *  before compiling the body is what makes circular requires detectable
+     *  and lets `extends` resolve parents across modules on demand. */
+    private function compileModule(string $path, string $spec, int $line): string {
         if (isset($this->modCache[$path])) {
-            return 'pyhp_module_' . $this->modCache[$path] . '()';
+            return $this->modCache[$path];
         }
         if (in_array($path, $this->modStack, true)) {
             throw new PyHPSyntaxError("circular module dependency: '{$spec}'");
@@ -944,9 +1139,12 @@ class PyHPTranspiler
         $savedNs = $this->ns;
         $savedDir = $this->sourceDir;
         $savedIndent = $this->indent;
+        $savedTop = $this->atUnitTop;
         $this->ns = $id . '_';
         $this->sourceDir = dirname($path);
         $this->modStack[] = $path;
+        $this->atUnitTop = false;
+        $this->unitVars[$id . '_'] = $this->collectUnitVars($stmts);
 
         // collect the module's own funcs/classes, then resolve property types
         $this->prePassStmts($stmts, true);
@@ -978,18 +1176,26 @@ class PyHPTranspiler
         $this->indent = 2;
         $this->w($buf, 'static $m = null;');
         $this->w($buf, 'if ($m !== null) { return $m; }');
+        $this->atUnitTop = true;   // these statements ARE the module's top level
         foreach ($stmts as $s) {
             if ($s['k'] === 'Func' && $s['name'] !== null) continue; // hoisted above
             if ($s['k'] === 'Class') continue;                       // hoisted above
             $this->emitStmt($s, $buf);
         }
+        $this->atUnitTop = false;
         $entries = [];
         foreach ($funcNames as $n) {
             $entries[] = var_export($n, true) . ' => fn(...$__a) => ' . $this->fnPhp($n) . '(...$__a)';
         }
         foreach ($lambdaNames as $n) {
-            // lambdas live in local vars of this init function; arrow fns capture by value
-            $entries[] = var_export($n, true) . ' => fn(...$__a) => $' . $n . '(...$__a)';
+            if (isset($this->unitVars[$id . '_'][$n])) {
+                // unit-level lambda: its value lives in the module state bucket
+                $entries[] = var_export($n, true) . ' => fn(...$__a) => pyhp_unit_get('
+                    . var_export($id, true) . ', ' . var_export($n, true) . ')(...$__a)';
+            } else {
+                // lambdas live in local vars of this init function; arrow fns capture by value
+                $entries[] = var_export($n, true) . ' => fn(...$__a) => $' . $n . '(...$__a)';
+            }
         }
         foreach ($classNames as $n) {
             $entries[] = var_export($n, true) . ' => fn(...$__a) => new ' . $this->clsPhp($n) . '(...$__a)';
@@ -1006,7 +1212,8 @@ class PyHPTranspiler
         $this->sourceDir = $savedDir;
         $this->ns = $savedNs;
         $this->indent = $savedIndent;
-        return 'pyhp_module_' . $id . '()';
+        $this->atUnitTop = $savedTop;
+        return $id;
     }
 
     /** Static scan of a module AST: exported names = named top-level functions,
@@ -1073,6 +1280,13 @@ class PyHPTranspiler
             }
             if ($name === 'require') {
                 return $this->emitRequire($e);
+            }
+            $unitCall = $this->unitVarRead($name);
+            if ($unitCall !== null) {
+                if (count($kws) > 0) {
+                    return "pyhp_call_kw({$unitCall}, {$posList}, {$kwList}, " . var_export($name, true) . ')';
+                }
+                return "pyhp_callfunc({$unitCall}, [" . $this->emitCallArgs($e['args']) . "], " . var_export($name, true) . ')';
             }
             if ($this->funcKnown($name)) {
                 if (count($kws) > 0) {

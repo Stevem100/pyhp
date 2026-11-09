@@ -15,7 +15,7 @@
 if (defined('PYHP_RUNTIME')) { return; }
 define('PYHP_RUNTIME', '1');
 
-const PYHP_VERSION = '0.5.0';
+const PYHP_VERSION = '0.6.0';
 
 /* =========================================================================
  * 1. Errors
@@ -49,6 +49,7 @@ function pyhp_error_class_map(): array {
         'ZeroDivisionError' => 'PyHPZeroDivisionError',
         'MemError'          => 'PyHPMemError',
         'RuntimeError'      => 'PyHPRuntimeError',
+        'StopIteration'     => 'PyHPStopIteration',
     ];
 }
 
@@ -206,6 +207,17 @@ final class PyHPBuiltin {
     public function __invoke(...$args) { return pyhp_call_builtin($this->name, $args); }
 }
 
+/** A class as a first-class value (module exports, `extends someVar`).
+ *  Callable — invoking it instantiates the class. */
+class InterpClassRef {
+    public ClassDef $def;
+    public $interp = null;
+    public function __construct(ClassDef $def, $interp) { $this->def = $def; $this->interp = $interp; }
+    public function __invoke(...$args) {
+        return $this->interp->instantiate($this->def, $args);
+    }
+}
+
 class ClassDef {
     public string $name = '';
     public ?ClassDef $parent = null;
@@ -225,6 +237,7 @@ class InterpInstance {
 class PyHPReturn extends Exception    { public $value; public function __construct($v) { $this->value = $v; } }
 class PyHPBreak extends Exception     {}
 class PyHPContinue extends Exception  {}
+class PyHPStopIteration extends PyHPError {}
 class PyHPThrow extends Exception     { public $value; public function __construct($v) { $this->value = $v; } }
 class PyHPExit extends Exception      { public int $exitCode; public function __construct(int $c) { $this->exitCode = $c; } }
 
@@ -348,6 +361,157 @@ function pyhp_num_str($v): string {
     return $r;
 }
 
+/* ----------------------------------------------------------------------
+ * pyhp_format — the f-string format mini-language ({x:.2f}, {n:>8,}, ...)
+ * Spec grammar (Python compatible):
+ *   [[fill]align][sign][#][0][width][,][.precision][type]
+ * Shared by the interpreter and the PHP transpiler, so both engines
+ * produce byte-identical output. pyhp_rt_format (C++) mirrors this.
+ * -------------------------------------------------------------------- */
+function pyhp_format($v, string $spec): string {
+    static $re = '/^(?:(?<fill>.)?(?<align>[<>^]))?(?<sign>[+\\- ]?)(?<alt>#)?(?<zero>0)?(?<width>\\d[\\d,]*|,)?(?:\\.(?<prec>\\d+))?(?<type>[bcdeEfFgGnosxX%])?$/';
+    if (!preg_match($re, $spec, $m)) {
+        throw new PyHPError("invalid format spec '{$spec}'");
+    }
+    $fill  = ($m['fill'] ?? '') !== '' ? $m['fill'] : null;
+    $align = ($m['align'] ?? '') !== '' ? $m['align'] : null;
+    $signC = ($m['sign'] ?? '') !== '' ? $m['sign'] : '-';
+    $alt   = ($m['alt'] ?? '') === '#';
+    $zero  = ($m['zero'] ?? '') === '0';
+    $grp   = false; $width = 0;
+    if (($m['width'] ?? '') !== '') {
+        $grp = strpos($m['width'], ',') !== false;
+        $width = (int)str_replace(',', '', $m['width']);
+    }
+    $prec = ($m['prec'] ?? '') !== '' ? (int)$m['prec'] : null;
+    $type = $m['type'] ?? '';
+
+    $isNum = is_int($v) || is_float($v) || is_bool($v);
+    $body = ''; $neg = false; $prefix = ''; $signStr = ''; $zeroPad = false;
+    if ($type === 's' || $type === 'c' || ($type === '' && !($isNum && !is_bool($v)))) {
+        // string-ish presentation (str, char, null, bool, and type 's' on anything)
+        if ($type === 'c') {
+            if (is_int($v) || is_bool($v)) {
+                $cp = (int)$v;
+                if ($cp < 0 || $cp > 0x10FFFF || ($cp >= 0xD800 && $cp <= 0xDFFF)) {
+                    throw new PyHPError('invalid code point for format type c');
+                }
+                $body = pyhp_utf8_chr($cp);
+            } else {
+                $s = pyhp_tostr($v);
+                if ($s === '') throw new PyHPError('cannot format an empty string with type c');
+                $body = mb_substr($s, 0, 1);
+            }
+        } elseif ($prec !== null && ($type === 's' || $type === '')) {
+            $body = mb_substr(pyhp_tostr($v), 0, $prec);
+        } else {
+            $body = pyhp_tostr($v);
+        }
+        if ($align === null) $align = '<';
+    } else {
+        if (!$isNum) throw new PyHPTypeError("unsupported value for format spec '{$spec}'");
+        $f = (float)$v; $i = (int)round($f);
+        $neg = $f < 0 || ($f == 0.0 && strpos((string)$v, '-') === 0);
+        $af = abs($f); $ai = abs($i);
+        $plainType = ($type === '' || $type === 'n');
+        if ($type === 'd' || ($type === '' && is_int($v))) {
+            if (is_float($v)) {
+                throw new PyHPTypeError("unknown format code 'd' for float — use :f or :g");
+            }
+            $body = (string)$ai;
+        } elseif ($type === 'b' || $type === 'o' || $type === 'x' || $type === 'X') {
+            if ($grp) throw new PyHPError("cannot use ',' with format type '{$type}'");
+            $digits = $type === 'b' ? decbin($ai) : ($type === 'o' ? decoct($ai) : dechex($ai));
+            if ($type === 'X') $digits = strtoupper($digits);
+            $body = $digits;
+            if ($alt) $prefix = $type === 'b' ? '0b' : ($type === 'o' ? '0o' : ($type === 'X' ? '0X' : '0x'));
+        } elseif ($type === 'f' || $type === 'F') {
+            $body = sprintf('%.' . ($prec ?? 6) . ($type === 'F' ? 'F' : 'f'), $af);
+            if ($type === 'f') $body = str_replace(['INF', 'NAN'], ['inf', 'nan'], $body);
+        } elseif ($type === 'e' || $type === 'E') {
+            $body = pyhp_fix_exp(sprintf('%.' . ($prec ?? 6) . $type, $af));
+        } elseif ($type === 'g' || $type === 'G' || ($plainType && is_float($v) && $prec !== null)) {
+            $body = pyhp_format_g($af, $prec === null ? 6 : max(1, $prec), $type !== 'G');
+            if ($type === 'G') $body = strtoupper($body);
+        } elseif ($type === '%') {
+            $body = sprintf('%.' . ($prec ?? 6) . 'f', $af * 100) . '%';
+        } else {
+            // type '' on a float, no precision: keep the engine-wide float text
+            $body = pyhp_num_str($af);
+        }
+        $signStr = $neg ? '-' : ($signC === '+' ? '+' : ($signC === ' ' ? ' ' : ''));
+        if ($zero && $align === null) {
+            $zeroPad = true;
+            if ($width > 0) {
+                $body = preg_replace_callback('/^(\\d+)(.*)$/s', function ($x) use ($width, $signStr, $prefix) {
+                    $avail = $width - strlen($signStr) - strlen($prefix) - strlen($x[2]);
+                    return str_pad($x[1], max(strlen($x[1]), $avail), '0', STR_PAD_LEFT) . $x[2];
+                }, $body);
+            }
+        }
+        if ($grp) {
+            $body = preg_replace_callback('/^\\d+/', fn($x) => pyhp_group_digits($x[0]), $body);
+        }
+        $body = $signStr . $prefix . $body;
+        if ($align === null) $align = '>';
+    }
+    if ($width > 0 && strlen($body) < $width) {
+        if ($align === '>') $body = str_pad($body, $width, $fill ?? ' ', STR_PAD_LEFT);
+        elseif ($align === '<') $body = str_pad($body, $width, $fill ?? ' ');
+        else {
+            $total = $width - strlen($body);
+            $left = intdiv($total, 2);
+            $body = str_pad('', $left, $fill ?? ' ') . $body . str_pad('', $total - $left, $fill ?? ' ');
+        }
+    }
+    return $body;
+}
+
+/** Read a module-level variable from a compiled module unit's state bucket.
+ *  Mirrors the interpreter's "undefined variable" error. */
+function pyhp_unit_get(string $unit, string $name) {
+    if (!isset($GLOBALS['__pyhp_unit_' . $unit][$name])) {
+        throw new PyHPError("undefined variable '{$name}'");
+    }
+    return $GLOBALS['__pyhp_unit_' . $unit][$name];
+}
+
+function pyhp_group_digits(string $d): string {
+    return preg_replace('/\\B(?=(\\d{3})+(?!\\d))/', ',', $d);
+}
+
+/** PHP prints e-notation as e+4; Python as e+04. Normalize to 2+ digits. */
+function pyhp_fix_exp(string $s): string {
+    return preg_replace('/([eE][+\\-])(\\d)(?!\\d)/', '${1}0${2}', $s);
+}
+
+/** Python-style %g: precision = significant digits, trailing zeros stripped. */
+function pyhp_format_g(float $v, int $p, bool $lower): string {
+    if (is_infinite($v) || is_nan($v)) {
+        $s = $v > 0 ? 'inf' : (is_nan($v) ? 'nan' : '-inf');
+        return $lower ? $s : strtoupper($s);
+    }
+    if ($v == 0.0) return '0';
+    $exp = (int)floor(log10(abs($v)));
+    if ($exp < -4 || $exp >= $p) {
+        $body = pyhp_fix_exp(sprintf('%.' . ($p - 1) . ($lower ? 'e' : 'E'), $v));
+        [$mant, $ex] = explode(($lower ? 'e' : 'E'), $body);
+        $mant = rtrim(rtrim($mant, '0'), '.');
+        if ($mant === '' || $mant === '-') $mant .= '0';
+        return $mant . ($lower ? 'e' : 'E') . $ex;
+    }
+    $body = sprintf('%.' . max(0, $p - 1 - $exp) . 'f', $v);
+    if (strpos($body, '.') !== false) $body = rtrim(rtrim($body, '0'), '.');
+    return $body;
+}
+
+function pyhp_utf8_chr(int $cp): string {
+    if ($cp < 0x80) return chr($cp);
+    if ($cp < 0x800) return chr(0xC0 | ($cp >> 6)) . chr(0x80 | ($cp & 0x3F));
+    if ($cp < 0x10000) return chr(0xE0 | ($cp >> 12)) . chr(0x80 | (($cp >> 6) & 0x3F)) . chr(0x80 | ($cp & 0x3F));
+    return chr(0xF0 | ($cp >> 18)) . chr(0x80 | (($cp >> 12) & 0x3F)) . chr(0x80 | (($cp >> 6) & 0x3F)) . chr(0x80 | ($cp & 0x3F));
+}
+
 function pyhp_repr_str(string $s): string {
     $out = "'";
     $map = ["\\" => '\\\\', "'" => "\\'", "\n" => '\\n', "\t" => '\\t', "\r" => '\\r', "\0" => '\\0'];
@@ -383,6 +547,7 @@ function pyhp_tostr($v): string {
     if ($v instanceof PyHPArena) return '<arena>';
     if ($v instanceof PyHPError) return $v->message;
     if ($v instanceof InterpFunc) return "<function {$v->name}>";
+    if ($v instanceof InterpClassRef) return "<class {$v->def->name}>";
     if ($v instanceof InterpInstance) {
         $hook = $GLOBALS['__pyhp_str_hook'] ?? null;
         if ($hook !== null) {
@@ -557,14 +722,57 @@ function pyhp_iter_values($v): array {
     if ($v instanceof PyList) return $v->a;
     if ($v instanceof PyDict) return array_keys($v->d);
     if (is_string($v)) return pyhp_chars($v);
+    // iterator protocol (transpiled classes, or interpreter instances via hook)
+    if (is_object($v) && (method_exists($v, '__iter__') || method_exists($v, '__next__'))) {
+        return pyhp_foreach($v);
+    }
+    $hook = $GLOBALS['__pyhp_iter_hook'] ?? null;
+    if ($hook !== null) {
+        $items = $hook($v);
+        if ($items !== null) return $items;
+    }
     throw new PyHPTypeError("'" . pyhp_type_name($v) . "' object is not iterable");
 }
 
 /** Normalize a value for foreach: returns [key => value] map. */
+/** Did this thrown value signal the end of iteration? Covers the compiled
+ *  engine (real PyHPStopIteration) and the interpreter (raise of a user
+ *  StopIteration class wrapped in PyHPThrow). */
+function pyhp_throw_is_stop($t): bool {
+    if ($t instanceof PyHPStopIteration) return true;
+    if ($t instanceof PyHPThrow && isset($t->value) && $t->value instanceof InterpInstance) {
+        for ($c = $t->value->cls; $c !== null; $c = $c->parent) {
+            if ($c->name === 'StopIteration') return true;
+        }
+    }
+    return false;
+}
+
 function pyhp_foreach($v): array {
     if ($v instanceof PyList) return array_values($v->a);
     if ($v instanceof PyDict) return $v->d;
     if (is_string($v)) return pyhp_chars($v);
+    // iterator protocol for transpiled user classes: __iter__() -> __next__()
+    if (is_object($v) && !($v instanceof Closure)) {
+        $it = $v;
+        if (method_exists($v, '__iter__')) {
+            $it = $v->__iter__();
+            if (!is_object($it) && !($it instanceof PyList)) {
+                throw new PyHPTypeError('__iter__ must return an object or list');
+            }
+            if ($it instanceof PyList) return array_values($it->a);
+        }
+        if (is_object($it) && method_exists($it, '__next__')) {
+            $out = [];
+            try {
+                while (true) { $out[] = $it->__next__(); }
+            } catch (PyHPStopIteration $e) {
+            } catch (PyHPThrow $t) {
+                if (!pyhp_throw_is_stop($t)) throw $t;
+            }
+            return $out;
+        }
+    }
     throw new PyHPTypeError("'" . pyhp_type_name($v) . "' object is not iterable");
 }
 
@@ -1424,12 +1632,12 @@ function pyhp_isinstance($v, $name): bool {
     }
     if (!is_object($v)) return false;
     $map = pyhp_error_class_map();
-    $candidates = [];
-    if (isset($map[$name])) $candidates[] = $map[$name];
-    $candidates[] = $name;
-    $candidates[] = 'PyHP_' . $name;
-    foreach ($candidates as $c) {
-        if (class_exists($c) && $v instanceof $c) return true;
+    if (isset($map[$name]) && $v instanceof $map[$name]) return true;
+    // transpiled classes carry their PyHP-level name (and inherit parents
+    // across module namespaces via the PHP class chain)
+    for ($c = get_class($v); $c !== false; $c = get_parent_class($c)) {
+        if ($c === $name || $c === 'PyHP_' . $name) return true;
+        if (defined($c . '::PYHP_CLASS') && constant($c . '::PYHP_CLASS') === $name) return true;
     }
     return false;
 }
@@ -1515,7 +1723,8 @@ function pyhp_cpp_type_kind(string $t): string {
     if (in_array($t, ['int64_t', 'long long', 'long', 'int', 'ssize_t', 'size_t', 'unsigned', 'int32_t', 'long long int'], true)) return 'i';
     if (in_array($t, ['double', 'float', 'long double'], true)) return 'd';
     if (preg_match('/^(const\s+)?(char|unsigned char|uint8_t|int8_t)\s*\**$/', $t) && str_contains($t, '*')) return 's';
-    throw new PyHPSyntaxError("pyhp-export: unsupported type '{$t}' (supported: int64_t, double, const char*, void)");
+    if ($t === 'pyhp_list' || $t === 'pyhp list') return 'l';
+    throw new PyHPSyntaxError("pyhp-export: unsupported type '{$t}' (supported: int64_t, double, const char*, pyhp_list, void)");
 }
 
 class PyHPCppNative
@@ -1575,6 +1784,9 @@ class PyHPCppNative
             $cdef = self::$ffi;
             $sig = self::$exports[$name];
             $kinds = self::paramKinds($sig);
+            if (in_array('l', $kinds, true) || pyhp_cpp_type_kind($sig['ret']) === 'l') {
+                throw new PyHPError("{$name}: pyhp_list across the bridge needs the exec helper or the native backend — the FFI bridge cannot marshal structs");
+            }
             self::$callables[$name] = function (...$args) use ($cdef, $name, $kinds) {
                 if (count($args) !== count($kinds)) {
                     throw new PyHPTypeError("{$name}() takes " . count($kinds) . " argument(s), " . count($args) . " given");
@@ -1626,6 +1838,8 @@ class PyHPCppNative
             case 's':
                 if (is_string($v)) return $v;
                 throw new PyHPTypeError("{$fn}() expects a string (const char*) argument, got " . pyhp_type_name($v));
+            case 'l':
+                throw new PyHPError("{$fn}(): pyhp_list arguments need the exec/native path — the FFI bridge cannot marshal structs");
         }
         throw new PyHPTypeError("{$fn}(): unsupported bridge kind '{$kind}'");
     }
@@ -1681,6 +1895,7 @@ class PyHPCppNative
         $srcFile = $dir . '/pyhp_native_' . $hash . '.cpp';
         $src = "// C++ source generated by PyHP " . PYHP_VERSION . " — " . $hash . "\n"
              . "#include <cstdint>\n#include <cstdio>\n#include <cstring>\n#include <cstdlib>\n#include <cmath>\n#include <string>\n"
+             . self::BRIDGE_TYPES . "\n"
              . implode("\n", array_filter($includes)) . "\n"
              . "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
              . implode("\n", $bodies) . "\n"
@@ -1744,6 +1959,13 @@ class PyHPCppNative
         return [implode("\n", $inc), implode("\n", $body)];
     }
 
+    /** Bridge type declarations shared by the block source and the dispatcher. */
+    private const BRIDGE_TYPES = "
+enum PyHpVKind : unsigned char { PYHP_VN = 0, PYHP_VI = 1, PYHP_VF = 2, PYHP_VS = 3 };
+struct pyhp_val { unsigned char kind; int64_t i; double f; const char* s; };
+struct pyhp_list { int64_t len; pyhp_val* items; };
+";
+
     /** Generated main() implementing the exec-mode line protocol. */
     private static function genDispatcher(array $exports): string {
         $protos = implode("\n", array_map(fn($e) => 'extern "C" ' . $e['decl'] . ';', $exports));
@@ -1760,6 +1982,7 @@ class PyHPCppNative
                     case 'i': $read[] = "        int64_t {$vn} = pyhp_rt_read_i();"; break;
                     case 'd': $read[] = "        double {$vn} = pyhp_rt_read_d();"; break;
                     case 's': $read[] = "        std::string s{$i} = pyhp_rt_read_s();\n        const char* {$vn} = s{$i}.c_str();"; break;
+                    case 'l': $read[] = "        pyhp_list a{$i} = pyhp_rt_read_list();"; break;
                 }
                 $call[] = $vn;
             }
@@ -1770,6 +1993,7 @@ class PyHPCppNative
                 case 'i': $body = "        std::printf(\"ok i:%lld\\n\", (long long){$name}({$callStr}));"; break;
                 case 'd': $body = "        std::printf(\"ok d:%s\\n\", pyhp_rt_fmt_d({$name}({$callStr})).c_str());"; break;
                 case 's': $body = "        pyhp_rt_write_s({$name}({$callStr}));"; break;
+                case 'l': $body = "        { pyhp_list r = {$name}({$callStr}); pyhp_rt_write_list(r); pyhp_list_free(&r); }"; break;
                 default:  $body = "        std::printf(\"err unsupported return type\\n\");";
             }
             $branches .= "    if ({$guard}sym == \"{$name}\") {\n"
@@ -1785,7 +2009,46 @@ class PyHPCppNative
 #include <cstdlib>
 #include <string>
 
+enum PyHpVKind : unsigned char { PYHP_VN = 0, PYHP_VI = 1, PYHP_VF = 2, PYHP_VS = 3 };
+struct pyhp_val { unsigned char kind; int64_t i; double f; const char* s; };
+struct pyhp_list { int64_t len; pyhp_val* items; };
+
 {$protos}
+
+static void pyhp_list_free(pyhp_list* L) {
+    if (!L->items) return;
+    for (int64_t i = 0; i < L->len; i++) {
+        if (L->items[i].kind == PYHP_VS && L->items[i].s != nullptr) std::free((void*)L->items[i].s);
+    }
+    std::free(L->items);
+    L->items = nullptr;
+}
+
+static pyhp_list pyhp_rt_read_list() {
+    long count = 0;
+    if (std::scanf(" l%ld:", &count) != 1) { std::printf("err bad list arg\\n"); std::exit(3); }
+    pyhp_list L;
+    L.len = (int64_t)count;
+    L.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (size_t)(count > 0 ? count : 1));
+    for (long i = 0; i < count; i++) {
+        char tag = 0;
+        if (std::scanf(" %c", &tag) != 1) { std::printf("err bad list element\\n"); std::exit(3); }
+        pyhp_val pv; pv.kind = PYHP_VN; pv.i = 0; pv.f = 0.0; pv.s = nullptr;
+        if (tag == 'i') { long long v = 0; std::scanf(":%lld", &v); pv.kind = PYHP_VI; pv.i = (int64_t)v; }
+        else if (tag == 'd') { char buf[64]; std::scanf(":%63s", buf); pv.kind = PYHP_VF; pv.f = std::strtod(buf, nullptr); }
+        else if (tag == 's') {
+            long len = 0;
+            std::scanf(":%ld:", &len);
+            std::string t((size_t)(len > 0 ? len : 0), '\\0');
+            if (len > 0 && std::fread(&t[0], 1, (size_t)len, stdin) != (size_t)len) { std::printf("err truncated string arg\\n"); std::exit(3); }
+            pv.kind = PYHP_VS; pv.s = strdup(t.c_str());
+            std::getchar(); // newline after the bytes
+        } else if (tag == 'n') { std::getchar(); }
+        else { std::printf("err bad list element tag\\n"); std::exit(3); }
+        L.items[i] = pv;
+    }
+    return L;
+}
 
 static int64_t pyhp_rt_read_i() {
     long long v = 0;
@@ -1817,6 +2080,21 @@ static std::string pyhp_rt_fmt_d(double d) {
     std::snprintf(buf, sizeof(buf), "%.17g", d);
     return std::string(buf);
 }
+static void pyhp_rt_write_list(const pyhp_list& L) {
+    std::printf("ok l:%lld:", (long long)L.len);
+    for (int64_t i = 0; i < L.len; i++) {
+        const pyhp_val& p = L.items[i];
+        if (p.kind == PYHP_VI) std::printf("i:%lld\\n", (long long)p.i);
+        else if (p.kind == PYHP_VF) std::printf("d:%s\\n", pyhp_rt_fmt_d(p.f).c_str());
+        else if (p.kind == PYHP_VS) {
+            unsigned long sl = p.s ? std::strlen(p.s) : 0;
+            std::printf("s:%lu:", sl);
+            if (sl > 0) std::fwrite(p.s, 1, sl, stdout);
+            std::printf("\\n");
+        } else std::printf("n\\n");
+    }
+}
+
 
 int main(int argc, char** argv) {
     if (argc < 2) { std::printf("err missing symbol\\n"); return 2; }
@@ -1830,6 +2108,53 @@ CPP;
     }
 
     /** One call over the exec-mode protocol. */
+    /** Encode a PyList argument in the exec-mode element protocol:
+     *  "l<count>\n" then one line per element (i:..\n d:..\n s:len:bytes\n n\n). */
+    private static function encodeListArg($v, string $fn): string {
+        if (!($v instanceof PyList)) {
+            throw new PyHPTypeError("{$fn}() expects a list (pyhp_list) argument, got " . pyhp_type_name($v));
+        }
+        $req = 'l' . count($v->a) . "\n";
+        foreach ($v->a as $el) {
+            if ($el === null) { $req .= "n\n"; }
+            elseif (is_int($el)) { $req .= "i:{$el}\n"; }
+            elseif (is_float($el)) { $req .= 'd:' . json_encode($el) . "\n"; }
+            elseif (is_string($el)) { $req .= 's:' . strlen($el) . ':' . $el . "\n"; }
+            else {
+                throw new PyHPTypeError("{$fn}(): pyhp_list elements must be int/float/string/null, got " . pyhp_type_name($el));
+            }
+        }
+        return $req;
+    }
+
+    /** Parse "ok l:<count>:" + element lines out of the response stream. */
+    private static function parseListPayload(string $out, int $p, int $count, string $name) {
+        $items = [];
+        for ($k = 0; $k < $count; $k++) {
+            if ($p >= strlen($out)) throw new PyHPRuntimeError("native call '{$name}': truncated list response");
+            $tag = $out[$p];
+            if ($tag === 'n') { $items[] = null; $p += 2; continue; }
+            if ($tag === 'i' || $tag === 'd') {
+                $nl = strpos($out, "\n", $p);
+                if ($nl === false) throw new PyHPRuntimeError("native call '{$name}': truncated list response");
+                $raw = substr($out, $p + 2, $nl - $p - 2);
+                $items[] = $tag === 'i' ? (int)$raw : (float)$raw;
+                $p = $nl + 1;
+                continue;
+            }
+            if ($tag === 's') {
+                $colon = strpos($out, ':', $p + 2);
+                $len = (int)substr($out, $p + 2, $colon - $p - 2);
+                $start = $colon + 1;
+                $items[] = substr($out, $start, $len);
+                $p = $start + $len + 1;
+                continue;
+            }
+            throw new PyHPRuntimeError("native call '{$name}': malformed list response");
+        }
+        return new PyList($items);
+    }
+
     private static function execCall(string $bin, string $name, array $args, array $kinds) {
         if (!is_file($bin)) throw new PyHPRuntimeError('native helper binary is missing: ' . $bin);
         $req = count($kinds) . "\n";
@@ -1838,6 +2163,7 @@ CPP;
                 case 'i': $req .= ((string)(int)self::toC($v, 'i', $name)) . "\n"; break;
                 case 'd': $req .= json_encode((float)self::toC($v, 'd', $name)) . "\n"; break;
                 case 's': $s = (string)self::toC($v, 's', $name); $req .= 's:' . strlen($s) . ':' . $s; break;
+                case 'l': $req .= self::encodeListArg($v, $name); break;
             }
         }
         $desc = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
@@ -1863,6 +2189,11 @@ CPP;
             $len = (int)substr($payload, 2, $colon - 2);
             $start = 3 + $colon + 1; // absolute offset of the string bytes in $out
             return substr($out, $start, $len);
+        }
+        if (str_starts_with($payload, 'l:')) {
+            $colon = strpos($out, ':', 5);
+            $count = (int)substr($out, 5, $colon - 5);
+            return self::parseListPayload($out, $colon + 1, $count, $name);
         }
         throw new PyHPRuntimeError("native call '{$name}': malformed response");
     }
