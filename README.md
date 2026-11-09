@@ -23,9 +23,15 @@ Both paths share the exact same data model, so the 26-case test suite passes eve
 
 Requirements: PHP 8.0+ (CLI). No extensions needed.
 
-> **Windows?** See [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md) for a 5-minute setup
-> guide (`winget install PHP.PHP.8.3`, extract to `C:\pyhp`, run
-> `pyhp run examples\01_hello.pyh` via the bundled `pyhp.bat` launcher).
+> **Windows?** One line in PowerShell — no admin rights:
+>
+> ```powershell
+> irm https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 | iex
+> ```
+>
+> The installer sets up PyHP *and* PHP 8.3 (only if you don't already have PHP),
+> adds `pyhp` to your PATH, and runs a smoke test. Full details, parameters and
+> a manual route: [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md).
 
 ```bash
 # run with the built-in interpreter

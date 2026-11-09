@@ -3,3 +3,5 @@
 *.md text
 *.php text
 *.pyh text
+# keep PowerShell scripts CRLF on Windows checkout
+*.ps1 text eol=crlf

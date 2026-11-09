@@ -2,9 +2,63 @@
 
 PyHP ships as a single folder — a Windows launcher (`pyhp.bat`) plus the language
 sources. The only prerequisite is **PHP 8.0 or newer (CLI)**; no PHP extensions
-are needed. Total setup time: about 5 minutes.
+are needed.
+
+There are two ways to install it:
+
+1. **The installer** (below) — one command, no admin rights, sets everything up.
+2. **The manual route** — Steps 1–5 further down, if you prefer to control every step.
 
 ---
+
+## The installer (recommended)
+
+### From PowerShell (copy-paste, one line)
+
+```powershell
+irm https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 | iex
+```
+
+### From cmd.exe (one line)
+
+```bat
+curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 -o "%TEMP%\pyhp-install.ps1" && powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\pyhp-install.ps1"
+```
+
+### Or: download the zip and double-click
+
+1. On the repo page (github.com/Stevem100/pyhp) click **Code → Download ZIP**.
+2. Extract it, then double-click **`install.bat`**.
+
+### What the installer does
+
+- Installs PyHP to `%LOCALAPPDATA%\Programs\PyHP` (no admin rights needed).
+- **PHP handling is automatic** — it reuses PHP if you already have it (PATH,
+  `PHP_BIN`, or a previous install); otherwise it downloads PHP 8.3 NTS x64
+  (~34 MB, once) **into the PyHP folder**, so PyHP is fully self-contained and
+  never conflicts with any other PHP on your system.
+- Adds the PyHP folder to your **user PATH**, so `pyhp` works in every new terminal.
+- Runs a smoke test and prints next steps.
+
+### Installer parameters (optional)
+
+Download `install.ps1` first, then run it with parameters:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir C:\pyhp
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -NoPath      # don't touch PATH
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -SkipPhp     # you manage PHP yourself
+```
+
+### Uninstall
+
+Double-click **`uninstall.bat`** in the install folder (or run
+`uninstall.ps1 -InstallDir <dir>` from anywhere). It removes the PATH entry and
+deletes the files.
+
+---
+
+# Manual install (Steps 1–5)
 
 ## Step 1 — Install PHP 8.0+ (one time)
 
