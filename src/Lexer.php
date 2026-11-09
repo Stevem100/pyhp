@@ -3,8 +3,9 @@
  * PyHP lexer — turns .pyh source text into a token stream.
  *
  * Token shape: ['t' => TYPE, 'v' => value, 'line' => int]
- * Types: INT FLOAT STR FSTR IDENT KW OP EOF
+ * Types: INT FLOAT STR FSTR IDENT KW OP CPP EOF
  * FSTR value = ['parts' => [['s', string], ['e', rawExprString], ...]]
+ * CPP  value = raw C++ source between the braces of `cpp { ... }`
  */
 
 require_once __DIR__ . '/runtime.php';
@@ -94,10 +95,78 @@ class PyHPLexer
         $line = $this->line;
         while ($this->i < $this->n && ($this->src[$this->i] === '_' || ctype_alnum($this->src[$this->i]))) { $this->i++; }
         $word = substr($this->src, $start, $this->i - $start);
+        // `cpp { ... }` — a raw C++ native block. Contextual: the identifier
+        // `cpp` followed (after whitespace) by '{' opens the block.
+        if ($word === 'cpp') {
+            $save = $this->i;
+            $savedLine = $this->line;
+            while ($this->i < $this->n && ($this->src[$this->i] === ' ' || $this->src[$this->i] === "\t" || $this->src[$this->i] === "\r" || $this->src[$this->i] === "\n")) {
+                if ($this->src[$this->i] === "\n") $this->line++;
+                $this->i++;
+            }
+            if ($this->i < $this->n && $this->src[$this->i] === '{') {
+                $code = $this->lexRawBraces();
+                return ['t' => 'CPP', 'v' => $code, 'line' => $line];
+            }
+            $this->i = $save;
+            $this->line = $savedLine;
+        }
         if (in_array($word, self::KEYWORDS, true)) {
             return ['t' => 'KW', 'v' => $word, 'line' => $line];
         }
         return ['t' => 'IDENT', 'v' => $word, 'line' => $line];
+    }
+
+    /** At '{': consume a balanced {...} region and return the raw text inside,
+     *  honouring C++ strings, char literals and comments so braces inside them
+     *  never confuse the counter. */
+    private function lexRawBraces(): string {
+        $openLine = $this->line;
+        $this->i++; // consume '{'
+        $start = $this->i;
+        $depth = 1;
+        while ($this->i < $this->n) {
+            $c = $this->src[$this->i];
+            if ($c === '/' && $this->peek(1) === '/') {
+                while ($this->i < $this->n && $this->src[$this->i] !== "\n") $this->i++;
+                continue;
+            }
+            if ($c === '/' && $this->peek(1) === '*') {
+                $this->i += 2;
+                while ($this->i < $this->n && !($this->src[$this->i] === '*' && $this->peek(1) === '/')) {
+                    if ($this->src[$this->i] === "\n") $this->line++;
+                    $this->i++;
+                }
+                if ($this->i >= $this->n) break;
+                $this->i += 2;
+                continue;
+            }
+            if ($c === '"' || $c === "'") {
+                $q = $c;
+                $this->i++;
+                while ($this->i < $this->n) {
+                    if ($this->src[$this->i] === "\\") { $this->i += 2; continue; }
+                    if ($this->src[$this->i] === "\n") $this->line++;
+                    if ($this->src[$this->i] === $q) { $this->i++; break; }
+                    $this->i++;
+                }
+                continue;
+            }
+            if ($c === '{') { $depth++; $this->i++; continue; }
+            if ($c === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    $code = substr($this->src, $start, $this->i - $start);
+                    $this->i++; // consume closing '}'
+                    return $code;
+                }
+                $this->i++;
+                continue;
+            }
+            if ($c === "\n") $this->line++;
+            $this->i++;
+        }
+        throw new PyHPSyntaxError("line {$openLine}: unterminated cpp { ... } block");
     }
 
     private function lexNumber(): array {

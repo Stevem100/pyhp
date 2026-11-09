@@ -36,6 +36,23 @@ foreach (pyhp_builtins() as $name => [$fn, $min, $max]) {
     ];
 }
 
+$stdlibSpec = [];
+foreach (['ai', 'sec', 'iot'] as $mod) {
+    $path = $root . '/lib/' . $mod . '.pyh';
+    if (!is_file($path)) { continue; }
+    $stmts = PyHPParser::parseSource((string)file_get_contents($path));
+    $fns = [];
+    foreach ($stmts as $st) {
+        if ($st['k'] === 'Func' && $st['name'] !== null) { $fns[] = $st['name']; }
+    }
+    sort($fns);
+    $stdlibSpec[$mod] = [
+        'load' => 'm = require("' . $mod . '");',
+        'functions' => $fns,
+        'deterministic' => true,
+    ];
+}
+
 $stringMethods = ['upper','lower','capitalize','strip','lstrip','rstrip','split',
     'replace','startswith','endswith','contains','find','count','join','chars'];
 $listMethods   = get_class_methods(new PyList([]));
@@ -49,7 +66,20 @@ $spec = [
     'runtime' => 'PHP 8.0+ CLI, no extensions',
     'engines' => [
         'interpreter' => 'tree-walking AST evaluator (pyhp run / pyhp repl)',
-        'transpiler' => 'PyHP -> standalone PHP 8 (pyhp build / pyhp compile); both engines must produce byte-identical output',
+        'transpiler' => 'PyHP -> standalone PHP 8 (pyhp build / pyhp compile)',
+        'nativeCpp' => 'PyHP -> single-file C++17 -> machine code (pyhp build --target cpp|native)',
+        'parity' => 'the 35-case test suite asserts byte-identical output across engines',
+    ],
+    'nativeCpp' => [
+        'cppBlocks' => 'cpp { ... } embeds C++17 in a .pyh file; functions declared with `// pyhp-export: <C decl>;` become callable from PyHP',
+        'bridgeTypes' => ['int64_t', 'double', 'const char*', 'void'],
+        'exportExample' => '// pyhp-export: double pyh_hypot(double a, double b);',
+        'bridgeModes' => 'PHP ext/ffi when available, else a compiled helper binary driven over a tiny line protocol (needs only g++)',
+        'cache' => './.pyhp_native/ (override with PYHP_NATIVE_CACHE, compiler with CXX)',
+        'nativeBackend' => 'pyhp build --target cpp -o app.cpp emits C++17; --target native -o app also compiles with g++',
+        'nativeSupports' => 'full value model, operators, methods, slicing, f-strings, comprehensions, top-level functions, foreach/while/for, try/catch/throw, require() of modules and stdlib, cpp blocks, sha256, json, base64/url builtins',
+        'nativeNotYet' => ['classes & super', 'lambda/function expressions', 'try/finally', 'md5/crc32', 'exec/system/env/sleep/input/malloc_arena', 'isinstance of classes'],
+        'rules' => ['export names are global — prefix them (pyh_mymod_fn)', 'first call compiles once, later calls are raw machine code', 'argument kinds are enforced at call time (TypeError on mismatch)'],
     ],
     'lexical' => [
         'comments' => ['// line', '# line', '/* block */'],
@@ -84,7 +114,8 @@ $spec = [
     'statements' => ['if/elseif/else', 'while', 'do...while', 'for(init;cond;update)',
         'foreach x in xs', 'foreach k, v in xs', 'break', 'continue', 'echo',
         'function', 'return', 'class X extends Y', 'try/catch/finally', 'throw',
-        'varDecl (int x = 5;)', 'expression statement'],
+        'varDecl (int x = 5;)', 'expression statement',
+        'cpp { ... } (native C++ block)'],
     'functions' => [
         'declaration' => 'function name(a, b = 5) { ... }',
         'typed' => 'function name(int a) string { ... }',
@@ -105,7 +136,7 @@ $spec = [
         'exports' => 'top-level named functions, top-level lambdas, classes (as factories)',
         'access' => 'm.fn(x), m.value, m["fn"](x); classes: m.ClassName(args)',
         'caching' => 'per resolved path; same table returned',
-        'resolution' => ['./vendor/<pkg>', '$PYHP_REGISTRY/<pkg>', '<install>/registry/<pkg>'],
+        'resolution' => ['./vendor/<pkg>', '$PYHP_REGISTRY/<pkg>', '<install>/lib/<name>.pyh (stdlib)', '<install>/registry/<pkg>'],
         'compiledMode' => 'spec must be a literal string; modules are inlined at build time',
         'recommendation' => 'keep modules stateless (pure functions/classes)',
     ],
@@ -114,6 +145,7 @@ $spec = [
         'cli' => ['pyhp pkg init [name]', 'pyhp pkg add <name>[@ver]', 'pyhp pkg remove <name>', 'pyhp pkg list'],
         'vendorDir' => 'vendor/',
     ],
+    'stdlib' => $stdlibSpec,
     'builtins' => $builtins,
     'stringMethods' => $stringMethods,
     'listMethods' => $listMethods,
@@ -214,7 +246,64 @@ $snippets = [
     ["How does dict + dict work?", 'print({"a": 1} + {"b": 2});'],
     ["How does string repetition work?", 'print("ab" * 3, [0] * 3);'],
     ["How do I format numbers inside strings?", 'pi = 3.14159;' . "\n" . 'print(f"pi={pi}, int={int(pi)}");'],
+    ["How does json_parse work?", 'd = json_parse(\'{"device":"th-1","ok":true,"r":[1,2.5]}\');' . "\n" . 'print(d.device, d.ok, d.r[1]);'],
+    ["How does json_string work?", 'print(json_string({"ok": true, "tags": ["a", "b"], "n": 2.5}));'],
+    ["How do the hashing builtins work?", 'print(md5("pyhp"));' . "\n" . 'print(sha256("pyhp"));' . "\n" . 'print(crc32("pyhp"));'],
+    ["How does base64 work?", 'print(base64e("agent:007"), "|", base64d(base64e("agent:007")));'],
+    ["How does urlenc/urldec work?", 'print(urlenc("q=white space&x=1"), "|", urldec("a%20b%26c"));'],
 ];
+
+$hasGxx = trim((string)shell_exec('command -v g++ 2>/dev/null')) !== '';
+if ($hasGxx) {
+    $snippets[] = ["How do I embed C++ in a PyHP file?",
+        'cpp {' . "\n"
+        . '    // pyhp-export: double pyh_hypot(double a, double b);' . "\n"
+        . '    double pyh_hypot(double a, double b) { return sqrt(a*a + b*b); }' . "\n"
+        . '}' . "\n"
+        . 'echo "hypot(3,4) = ", pyh_hypot(3, 4), "\\n";'];
+    $snippets[] = ["Can C++ native functions mix with normal PyHP code?",
+        'cpp {' . "\n"
+        . '    // pyhp-export: int64_t pyh_mul3(int64_t a, int64_t b, int64_t c);' . "\n"
+        . '    int64_t pyh_mul3(int64_t a, int64_t b, int64_t c) { return a * b * c; }' . "\n"
+        . '}' . "\n"
+        . 'function square(n) { return n * n; }' . "\n"
+        . 'print(pyh_mul3(square(2), 3, 4));'];
+}
+$snippets[] = ["How do I use the ai module for linear regression?",
+    'ai = require("ai");' . "\n"
+    . 'model = ai.linear_fit([0, 1, 2, 3, 4], [1, 3, 5, 7, 9], 0.05, 800);' . "\n"
+    . 'print("w=", round(model.w, 4), "b=", round(model.b, 4));' . "\n"
+    . 'print("predict(6)=", round(ai.linear_predict(model, 6), 4));'];
+$snippets[] = ["How do I cluster points with the ai module?",
+    'ai = require("ai");' . "\n"
+    . 'km = ai.kmeans([[0, 0], [0, 1], [10, 10], [10, 11]], 2, 5);' . "\n"
+    . 'print(km.labels, km.inertia);'];
+$snippets[] = ["How do I split a dataset in PyHP?",
+    'ai = require("ai");' . "\n"
+    . 'split = ai.train_test_split(["a", "b", "c", "d", "e"], 0.4, 42);' . "\n"
+    . 'print(split.train, split.test);'];
+$snippets[] = ["How do I crack a Caesar cipher with PyHP?",
+    'sec = require("sec");' . "\n"
+    . 'enc = sec.caesar("Attack at dawn", 3);' . "\n"
+    . 'c = sec.crack_caesar(enc);' . "\n"
+    . 'print("shift=", c.shift, "text=", c.plaintext);'];
+$snippets[] = ["How does the sec module compute subnet information?",
+    'sec = require("sec");' . "\n"
+    . 's = sec.subnet("192.168.1.10/24");' . "\n"
+    . 'print(s.network, s.mask, s.hosts);'];
+$snippets[] = ["How does string entropy work in the sec module?",
+    'sec = require("sec");' . "\n"
+    . 'print(round(sec.entropy("aabbccdd"), 4), round(sec.log2(8), 4));'];
+$snippets[] = ["How do I simulate and smooth a sensor stream in PyHP?",
+    'iot = require("iot");' . "\n"
+    . 'raw = iot.sensor_sim(99, 4, 20.0, 2.0);' . "\n"
+    . 'print(raw);' . "\n"
+    . 'print(iot.moving_avg(raw, 2));'];
+$snippets[] = ["How do I build a CRC-checked telemetry frame in PyHP?",
+    'iot = require("iot");' . "\n"
+    . 'wire = iot.mqtt_publish("dev-1", [21.5, 21.7], 1000);' . "\n"
+    . 'msg = iot.mqtt_consume(wire);' . "\n"
+    . 'print(msg.topic, json_parse(msg.payload).readings);'];
 
 $qa = [];
 $skipped = 0;
@@ -241,7 +330,7 @@ foreach ($snippets as [$question, $code]) {
 /* how-to answers without code output (docs-derived, deterministic facts) */
 $facts = [
     ["What is PyHP?",
-     "PyHP is a small dynamically typed scripting language with a PHP-family syntax and three bloodlines:\n\n- **PHP**: braces, semicolons, `echo`, `foreach`, C-style `for`, but **no `$` before variables**\n- **Python**: lists & dicts that alias like objects, negative-index slicing with steps (`xs[::-1]`), comprehensions, lambdas & closures, classes with `super` and `__str__`, Python truthiness, rich builtins\n- **C**: `0xFF`/`0b1010` literals, bitwise operators, optional static type annotations enforced at runtime, a deterministic `malloc_arena()` byte buffer with use-after-free and double-free detection, plus file/env/exec escape hatches\n\nPyHP ships two execution paths built from one front-end: a tree-walking interpreter (`pyhp run`, `pyhp repl`) and a transpiler to standalone PHP 8 (`pyhp build`, `pyhp compile`). The 29-case test suite runs every program through both engines and asserts byte-identical output."],
+     "PyHP is a small dynamically typed scripting language with a PHP-family syntax and three bloodlines:\n\n- **PHP**: braces, semicolons, `echo`, `foreach`, C-style `for`, but **no `$` before variables**\n- **Python**: lists & dicts that alias like objects, negative-index slicing with steps (`xs[::-1]`), comprehensions, lambdas & closures, classes with `super` and `__str__`, Python truthiness, rich builtins\n- **C**: `0xFF`/`0b1010` literals, bitwise operators, optional static type annotations enforced at runtime, a deterministic `malloc_arena()` byte buffer with use-after-free and double-free detection, plus file/env/exec escape hatches\n\nPyHP ships three execution paths built from one front-end: a tree-walking interpreter (`pyhp run`, `pyhp repl`), a transpiler to standalone PHP 8 (`pyhp build`, `pyhp compile`) and a native C++ backend (`pyhp build --target cpp|native`). You can also embed real C++ with `cpp { ... }` blocks, and the stdlib ships `ai` (machine learning), `sec` (security research) and `iot` (telemetry) modules plus JSON/crypto built-ins. The 35-case test suite runs every program through the engines and asserts byte-identical output."],
     ["How do I install PyHP on Windows?",
      "One line in PowerShell:\n\n```powershell\nirm https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 | iex\n```\n\nThe installer needs no admin rights: it installs PyHP to `%LOCALAPPDATA%\\Programs\\PyHP`, reuses PHP if you already have it (PATH / `PHP_BIN`), otherwise downloads PHP 8.3 NTS x64 into the PyHP folder, adds `pyhp` to your user PATH, and runs a smoke test. Manual route and parameters (`-InstallDir`, `-NoPath`, `-SkipPhp`): see `INSTALL-WINDOWS.md`. Uninstall with `uninstall.bat` in the install folder."],
     ["How do I install PyHP on Linux/macOS?",
@@ -249,7 +338,11 @@ $facts = [
     ["How do I run a PyHP program?",
      "```bash\npyhp run script.pyh            # interpreter\npyhp compile script.pyh        # transpile to PHP in a temp file + run (fast path)\npyhp build script.pyh -o out.php && php out.php   # standalone output\npyhp repl                      # interactive shell\n```\n\nAll four accept extra CLI args, which the program reads with `argv()`. Without the launcher, use `php bin/pyhp <command>`."],
     ["How do I create and use a PyHP package?",
-     "Packages are folders with a `pyhp.json` manifest and an entry `.pyh` file:\n\n```bash\nmkdir mylib && cd mylib\npyhp pkg init                 # creates pyhp.json + src/mylib.pyh stub\n# ... write top-level functions/classes in src/mylib.pyh ...\npyhp pkg list                 # shows registry packages you can depend on\n```\n\nConsume it from another project:\n\n```bash\npyhp pkg add mylib            # copies into vendor/, records in pyhp.json\n```\n\n```c\nmylib = require(\"mylib\");\necho mylib.hello(\"world\");\n```\n\nThe registry search order is `./vendor/`, then `\$PYHP_REGISTRY`, then the `<PyHP install>/registry/` folder that ships with `strings`, `mathx` and `texttable`."],
+     "Packages are folders with a `pyhp.json` manifest and an entry `.pyh` file:\n\n```bash\nmkdir mylib && cd mylib\npyhp pkg init                 # creates pyhp.json + src/mylib.pyh stub\n# ... write top-level functions/classes in src/mylib.pyh ...\npyhp pkg list                 # shows registry packages you can depend on\n```\n\nConsume it from another project:\n\n```bash\npyhp pkg add mylib            # copies into vendor/, records in pyhp.json\n```\n\n```c\nmylib = require(\"mylib\");\necho mylib.hello(\"world\");\n```\n\nThe resolution order is `./vendor/`, then `\$PYHP_REGISTRY`, then the stdlib `<PyHP install>/lib/` folder (`ai`, `sec`, `iot`), then the bundled `<PyHP install>/registry/` folder that ships with `strings`, `mathx` and `texttable`."],
+    ["How do I embed C++ in PyHP and when should I compile natively?",
+     "Two escalation paths:\n\n1. **`cpp { ... }` blocks** — embed C++17 in a `.pyh` file. Functions declared with a `// pyhp-export:` directive become callable:\n\n```c\ncpp {\n    // pyhp-export: double pyh_hypot(double a, double b);\n    double pyh_hypot(double a, double b) { return sqrt(a*a + b*b); }\n}\necho pyh_hypot(3, 4);   // 5.0 — machine code\n```\n\nBridge types are `int64_t`, `double`, `const char*` and `void`. The first call compiles the block with g++ (cached in `./.pyhp_native/`); later calls are raw machine code. Works in every engine.\n\n2. **Native backend** — compile the whole program to a binary with `pyhp build app.pyh --target native -o app`; your cpp blocks go straight into the executable and no PHP is involved at runtime.\n\nUse the interpreter/PHP path for scripting and the native path for compute-heavy loops, CLI tools and deployment to machines without PHP."],
+    ["What is in the PyHP standard library?",
+     "Three stdlib modules ship with the language in `lib/` and load with `require()` — no package install needed:\n\n- `require(\"ai\")` — machine learning: `linear_fit`/`linear_predict` (gradient descent), `kmeans`/`nearest_centroid`, vector math (`dot`, `euclid`, `cosine`, `matmul`), statistics (`mean`, `stdev`, `median`), scaling (`minmax`, `standardize`), deterministic splits (`train_test_split`), metrics (`accuracy`, `mse`, `r2`).\n- `require(\"sec\")` — security research: `caesar`, `rot13`, `vigenere`, `xor_cipher`, `crack_caesar` (chi-square English scoring), `entropy`, `hexdump`, `subnet`, `ip_to_int`, `hash_file`.\n- `require(\"iot\")` — telemetry: `sensor_sim`, `moving_avg`, `ema`, `deadband`, `rolling_stats`, `crc16` (CRC-16/Modbus), `telemetry`/`telemetry_batch` (JSON/NDJSON), `mqtt_publish`/`mqtt_consume` (CRC-checked frames).\n\nAll functions are pure and deterministic (seeded LCGs, no wall-clock), so runs are reproducible and byte-identical across the interpreter, PHP build and native C++ build. JSON/crypto built-ins are always available: `json_parse`, `json_string`, `md5`, `sha256`, `crc32`, `base64e/base64d`, `urlenc/urldec`."],
     ["What does a PyHP module export?",
      "Everything defined at the **top level** of the module file:\n\n- named functions (`function f() {...}`)\n- top-level lambdas (`double = lambda n: n * 2;`)\n- classes, exposed as factories you call like functions (`m.Circle(5)`)\n\n`require(\"./lib.pyh\")` runs the file once in an isolated scope, caches the result per path, and returns the export table. Access members with dot syntax or indexing: `m.fn(x)`, `m.value`, `m[\"fn\"](x)`. Modules are isolated: their top-level variables do not leak into your program."],
     ["What are the differences between the interpreter and the transpiler?",
@@ -332,6 +425,31 @@ $tasks = [
         'function mode(xs) {' . "\n" . '    counts = {};' . "\n" . '    foreach x in xs { counts[x] = counts.get(x, 0) + 1; }' . "\n" . '    best = null; bestN = 0;' . "\n" . '    foreach k, v in counts {' . "\n" . '        if v > bestN { best = k; bestN = v; }' . "\n" . '    }' . "\n" . '    return best;' . "\n" . '}' . "\n" . 'print(mode([1, 2, 2, 3, 2]), mode(["a", "b", "a"]));', "2 a\n"],
     ["Write a PyHP program that reads a file of numbers (one per line) and prints their sum.",
         'file_write("/tmp/pyhp_nums.txt", "1\\n2\\n3\\n4\\n");' . "\n" . 'total = sum([int(line) for line in file_read("/tmp/pyhp_nums.txt").strip().split("\\n")]);' . "\n" . 'print(total);', "10\n"],
+    ["Write a PyHP program that embeds a C++ function via a cpp block and calls it.",
+        'cpp {' . "\n"
+        . '    // pyhp-export: int64_t pyh_tri(int64_t n);' . "\n"
+        . '    int64_t pyh_tri(int64_t n) { return n * (n + 1) / 2; }' . "\n"
+        . '}' . "\n"
+        . 'print("tri(10)=", pyh_tri(10));', "tri(10)= 55\n"],
+    ["Use the ai module: fit a line through (0,1) (2,5) (4,9) and predict at x=10.",
+        'ai = require("ai");' . "\n"
+        . 'model = ai.linear_fit([0, 2, 4], [1, 5, 9], 0.05, 2000);' . "\n"
+        . 'print(round(ai.linear_predict(model, 10), 4));', "21.0\n"],
+    ["Use the sec module: decrypt the Caesar ciphertext 'Wkh txlfn eurzq ira mxpsv ryhu wkh odcb grj' without hardcoding the key.",
+        'sec = require("sec");' . "\n"
+        . 'print(sec.crack_caesar("Wkh txlfn eurzq ira mxpsv ryhu wkh odcb grj").plaintext);', "The quick brown fox jumps over the lazy dog\n"],
+    ["Use the iot module: CRC-check and decode an MQTT-style frame, printing the payload readings.",
+        'iot = require("iot");' . "\n"
+        . 'wire = iot.mqtt_publish("sensor/1", [1.5, 2.5], 77);' . "\n"
+        . 'msg = iot.mqtt_consume(wire);' . "\n"
+        . 'print(msg.topic, json_parse(msg.payload).readings);', "sensor/1/telemetry [1.5, 2.5]\n"],
+    ["Write a PyHP function jsonify(rows) that turns a list of dicts into an NDJSON string.",
+        'function jsonify(rows) {' . "\n"
+        . '    out = "";' . "\n"
+        . '    foreach r in rows { out += json_string(r) + "\\n"; }' . "\n"
+        . '    return out;' . "\n"
+        . '}' . "\n"
+        . 'print(jsonify([{"a": 1}, {"b": 2}]));', "{\"a\":1}\n{\"b\":2}\n\n"],
 ];
 
 $code = [];

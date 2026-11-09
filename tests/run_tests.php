@@ -502,6 +502,115 @@ function name() {
 H2
     ]]];
 
+$T[] = ['json & crypto builtins', <<<'CODE'
+d = json_parse('{"device":"th-1","ok":true,"r":[1,2.5,"x"],"nest":{"a":null}}');
+print(d.device, d.ok, d.r[1], d.r[2], d.nest.a);
+print(json_string({"b": 2, "list": [1, 2, 3]}));
+print(md5("pyhp"));
+print(sha256("pyhp"));
+print(crc32("pyhp"));
+print(base64e("hello"), "|", base64d("aGVsbG8="));
+print(urlenc("a b&c=d"), "|", urldec("a%20b%26c%3Dd"));
+try {
+    json_parse("{broken");
+} catch (ValueError e) {
+    print("caught:", e.message);
+}
+CODE
+, <<<"OUT"
+th-1 true 2.5 x null
+{"b":2,"list":[1,2,3]}
+111149b979af7a51eb303a5faaee1a62
+2ac2ce5eb073902398e8b5cd8b40a912cd7b6cc5742188ef55217263aee22c5a
+ec7abccc
+aGVsbG8= | hello
+a%20b%26c%3Dd | a b&c=d
+caught: json_parse(): invalid JSON — Syntax error
+
+OUT
+];
+
+$T[] = ['stdlib: ai module (ML toolkit)', <<<'CODE'
+ai = require("ai");
+model = ai.linear_fit([0, 1, 2, 3, 4], [1, 3, 5, 7, 9], 0.05, 800);
+print("w=", round(model.w, 4), " b=", round(model.b, 4));
+print("predict(6)=", ai.linear_predict(model, 6));
+print("r2=", ai.r2([2, 4, 6], [2, 4, 6]), " acc=", ai.accuracy([1, 0, 1], [1, 1, 1]));
+print("dot=", ai.dot([1, 2, 3], [4, 5, 6]), " euclid=", ai.euclid([0, 0], [3, 4]));
+km = ai.kmeans([[0, 0], [0, 1], [10, 10], [10, 11]], 2, 5);
+print("labels=", km.labels);
+split = ai.train_test_split(["a", "b", "c", "d", "e"], 0.4, 42);
+print("train=", split.train, " test=", split.test);
+print("minmax=", ai.minmax([10, 20, 30]), " sig=", round(ai.sigmoid(0), 5));
+CODE
+, <<<"OUT"
+w= 2.0  b= 1.0
+predict(6)= 13.000001754802
+r2= 1.0  acc= 0.66666666666667
+dot= 32.0  euclid= 5.0
+labels= [0, 0, 1, 1]
+train= ['a', 'd', 'b']  test= ['e', 'c']
+minmax= [0, 0.5, 1]  sig= 0.5
+
+OUT
+];
+
+$T[] = ['stdlib: sec module (security toolkit)', <<<'CODE'
+sec = require("sec");
+enc = sec.caesar("Attack at dawn", 3);
+print(enc, " -> ", sec.crack_caesar(enc).plaintext);
+print("rot13=", sec.rot13("Hello"), " xor=", sec.xor_cipher(sec.xor_cipher("data", "k"), "k"));
+print("entropy=", sec.entropy("aabbccdd"));
+s = sec.subnet("192.168.1.10/24");
+print("net=", s.network, " mask=", s.mask, " hosts=", s.hosts);
+print("ip=", sec.ip_to_int("10.0.0.1"), " back=", sec.int_to_ip(sec.ip_to_int("10.0.0.1")));
+print("pwd=", sec.password_gen(10, 7));
+print("log2(8)=", sec.log2(8));
+print(sec.hexdump("AB"));
+CODE
+, <<<"OUT"
+Dwwdfn dw gdzq  ->  Attack at dawn
+rot13= Uryyb  xor= data
+entropy= 2.0
+net= 192.168.1.0  mask= 255.255.255.0  hosts= 254
+ip= 167772161  back= 10.0.0.1
+pwd= ARW9Ol!BKr
+log2(8)= 3.0
+00000000  41 42  |AB|
+
+
+OUT
+];
+
+$T[] = ['stdlib: iot module (telemetry toolkit)', <<<'CODE'
+iot = require("iot");
+reads = iot.sensor_sim(99, 5, 20.0, 2.0);
+print("reads=", reads);
+st = iot.rolling_stats(reads);
+print("min=", st.min, " count=", st.count);
+print("crc16=", iot.crc16("123456789"));
+wire = iot.mqtt_publish("dev-1", [21.5, 21.7], 1000);
+msg = iot.mqtt_consume(wire);
+print("topic=", msg.topic);
+doc = json_parse(msg.payload);
+print("device=", doc.device, " readings=", doc.readings);
+batch = iot.telemetry_batch("d", [1, 2, 3, 4], 10, 2);
+lines = batch.split("\n");
+print("lines=", len(lines) - 1, " first=", iot.parse_telemetry(lines[0]).device);
+print("clamp=", iot.clamp(15, 0, 10), " flags=", iot.threshold_flags([5, 95], 0, 50));
+CODE
+, <<<"OUT"
+reads= [19.1026, 20.258, 18.1902, 19.0048, 18.282]
+min= 18.1902  count= 5
+crc16= 19255
+topic= dev-1/telemetry
+device= dev-1  readings= [21.5, 21.7]
+lines= 2  first= d
+clamp= 10  flags= [false, true]
+
+OUT
+];
+
 /* ================================================================ */
 /* runners                                                          */
 /* ================================================================ */
@@ -622,6 +731,63 @@ foreach ($T as $case) {
             $results[] = "    compiled got:         " . json_encode($gotC);
         }
     }
+}
+
+/* ---------------- native backend tests (need g++, skipped otherwise) ---------------- */
+$hasGxx = trim((string)shell_exec('command -v g++ 2>/dev/null')) !== '';
+if ($hasGxx) {
+    $nativeCases = [
+        ['native backend: core language', <<<'CODE'
+function fib(n) {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+xs = [3, 1, 2];
+xs.sort();
+d = {"k": [1, 2, 3]};
+print(fib(10), xs, d.k[2], len("abc"));
+print([x * x for x in xs if x > 1], xs[1:], "a" + 1 + true);
+try {
+    throw ValueError("nope");
+} catch (ValueError e) {
+    print("caught", e.message);
+}
+CODE
+, "55 [1, 2, 3] 3 3\n[4, 9] [2, 3] a1true\ncaught nope\n"],
+        ['native backend: cpp blocks', <<<'CODE'
+cpp {
+    // pyhp-export: int64_t pyh_add3(int64_t a, int64_t b, int64_t c);
+    int64_t pyh_add3(int64_t a, int64_t b, int64_t c) {
+        return a + b * c;
+    }
+}
+print("sum=", pyh_add3(2, 3, 4));
+CODE
+, "sum= 14\n"],
+    ];
+    foreach ($nativeCases as [$name, $code, $expected]) {
+        $dir = pyhp_test_fixture_dir(['main.pyh' => $code]);
+        $oldCwd = getcwd();
+        chdir($dir);
+        $bin = $dir . '/app';
+        $build = shell_exec(escapeshellarg($phpBin) . ' ' . escapeshellarg(__DIR__ . '/../bin/pyhp')
+            . ' build main.pyh --target native -o ' . escapeshellarg($bin) . ' 2>&1');
+        $gotN = is_file($bin) ? (string)shell_exec(escapeshellarg($bin) . ' 2>&1') : "<<nobin>> " . $build;
+        chdir($oldCwd);
+        pyhp_test_cleanup($dir);
+        $okN = ($gotN === $expected);
+        if ($okN) {
+            $passed++;
+            $results[] = sprintf("  %-46s %s", $name, "PASS (native)");
+        } else {
+            $failed++;
+            $results[] = sprintf("  %-46s FAIL (native)", $name);
+            $results[] = "    native expected: " . json_encode($expected);
+            $results[] = "    native got:      " . json_encode($gotN);
+        }
+    }
+} else {
+    $results[] = sprintf("  %-46s %s", "native backend tests", "SKIP (no g++ found)");
 }
 
 echo "PyHP test suite — {$passed} passed, {$failed} failed\n";

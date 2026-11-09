@@ -1,0 +1,47 @@
+// PyHP — AI development with the `ai` stdlib module.
+// Run:  php bin/pyhp run examples/08_ai_ml.pyh
+// Or fully native: php bin/pyhp build examples/08_ai_ml.pyh --target native -o /tmp/ai_demo && /tmp/ai_demo
+
+ai = require("ai");
+
+echo "== machine learning in PyHP ==\n";
+
+// ---- regression: learn y = 2x + 1 from noisy data ----
+xs = [0, 1, 2, 3, 4, 5, 6, 7];
+ys = [1.1, 2.9, 5.2, 6.8, 9.2, 11.1, 12.8, 15.2];
+model = ai.linear_fit(xs, ys, 0.02, 4000);
+echo "learned line: y = ", round(model.w, 3), "x + ", round(model.b, 3);
+echo "  (loss ", model.loss, ")\n";
+echo "predict(10) = ", round(ai.linear_predict(model, 10), 2), "\n";
+pred = [ai.linear_predict(model, x) for x in xs];
+echo "R^2 = ", round(ai.r2(pred, ys), 4), "\n";
+
+// ---- classification metrics ----
+actual  = ["spam", "ham", "spam", "spam", "ham", "ham", "spam"];
+guessed = ["spam", "ham", "ham",  "spam", "ham", "spam", "spam"];
+echo "accuracy = ", ai.accuracy(guessed, actual), "\n";
+
+// ---- clustering: 2D points in two obvious groups ----
+points = [[0, 0], [1, 0], [0, 1], [9, 9], [10, 9], [9, 10]];
+km = ai.kmeans(points, 2, 20);
+echo "cluster labels = ", km.labels, "\n";
+echo "centroids      = ", km.centroids, "\n";
+echo "new point [8, 10] -> cluster ", ai.nearest_centroid(km, [8, 10]), "\n";
+
+// ---- vectors ----
+a = [1, 2, 3];
+b = [4, 5, 6];
+echo "dot     = ", ai.dot(a, b), "\n";
+echo "euclid  = ", ai.euclid(a, b), "\n";
+echo "cosine  = ", round(ai.cosine(a, b), 4), "\n";
+echo "matmul  = ", ai.matmul([[1, 2], [3, 4]], [[5, 6], [7, 8]]), "\n";
+
+// ---- deterministic data hygiene ----
+split = ai.train_test_split(range(10), 0.3, 7);
+echo "train = ", split.train, "\n";
+echo "test  = ", split.test, "\n";
+norm = ai.minmax([14, 22, 35, 47]);
+echo "minmax scaled = ", norm, "\n";
+z = ai.standardize([10, 20, 30, 40]);
+echo "z-scored      = ", z.values, " (mean ", z.mean, ")\n";
+echo "sigmoid(0) = ", ai.sigmoid(0), "  relu(-3) = ", ai.relu(-3), "\n";

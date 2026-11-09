@@ -15,7 +15,7 @@
 if (defined('PYHP_RUNTIME')) { return; }
 define('PYHP_RUNTIME', '1');
 
-const PYHP_VERSION = '0.2.0';
+const PYHP_VERSION = '0.3.0';
 
 /* =========================================================================
  * 1. Errors
@@ -423,8 +423,13 @@ function pyhp_mod($a, $b) {
     if (pyhp_is_num($a) && pyhp_is_num($b)) {
         $x = pyhp_num($a); $y = pyhp_num($b);
         if ($y == 0) throw new PyHPZeroDivisionError('modulo by zero');
+        if (is_int($x) && is_int($y)) {
+            // exact 64-bit path — the float fallback loses precision on big ints
+            $r = $x % $y;
+            if ($r !== 0 && (($r < 0) !== ($y < 0))) $r += $y;
+            return $r;
+        }
         $r = $x - $y * floor($x / $y);           // Python-style sign semantics
-        if (is_int($x) && is_int($y)) return (int)$r;
         return $r;
     }
     throw new PyHPTypeError("unsupported operand type(s) for %: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
@@ -783,6 +788,8 @@ function pyhp_resolve_module(string $spec, string $baseDir): ?string {
     $roots = [ rtrim($baseDir, '/\\') . '/vendor/' . $spec ];
     $reg = getenv('PYHP_REGISTRY');
     if ($reg !== false && $reg !== '') $roots[] = rtrim($reg, '/\\') . '/' . $spec;
+    // stdlib modules bundled with the language (lib/ai.pyh, lib/sec.pyh, lib/iot.pyh)
+    $roots[] = dirname(__DIR__) . '/lib';
     $roots[] = dirname(__DIR__) . '/registry/' . $spec;
     foreach ($roots as $dir) {
         if (!is_dir($dir)) continue;
@@ -798,6 +805,11 @@ function pyhp_resolve_module(string $spec, string $baseDir): ?string {
         foreach ($tries as $t) {
             if (str_contains($t, '..')) continue;
             $rp = realpath($dir . '/' . $t);
+            if ($rp !== false && is_file($rp)) return $rp;
+        }
+        // the stdlib root holds bare files: lib/<name>.pyh
+        if ($dir === dirname(__DIR__) . '/lib') {
+            $rp = realpath($dir . '/' . $spec . '.pyh');
             if ($rp !== false && is_file($rp)) return $rp;
         }
     }
@@ -1120,9 +1132,78 @@ function pyhp_builtins(): array {
 
         /* memory arena ("C DNA") */
         'malloc_arena' => [function () { return new PyHPArena(); }, 0, 0],
+
+        /* json + crypto + text encoding (AI / security / IoT toolkit) */
+        'json_parse' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'json_parse', 1, 1);
+            $v = json_decode((string)pyhp_strcast_arg($a[0], 'json_parse'), true);
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                throw new PyHPValueError('json_parse(): invalid JSON — ' . json_last_error_msg());
+            }
+            return pyhp_json_to_val($v);
+        }, 1, 1],
+        'json_string' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'json_string', 1, 1);
+            $s = json_encode(pyhp_val_to_json($a[0]),
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION);
+            if ($s === false) throw new PyHPValueError('json_string(): value is not JSON-serializable');
+            return $s;
+        }, 1, 1],
+        'md5' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'md5', 1, 1);
+            return md5(pyhp_strcast_arg($a[0], 'md5'));
+        }, 1, 1],
+        'sha256' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'sha256', 1, 1);
+            return hash('sha256', pyhp_strcast_arg($a[0], 'sha256'));
+        }, 1, 1],
+        'crc32' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'crc32', 1, 1);
+            return hash('crc32b', pyhp_strcast_arg($a[0], 'crc32'));
+        }, 1, 1],
+        'base64e' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'base64e', 1, 1);
+            return base64_encode(pyhp_strcast_arg($a[0], 'base64e'));
+        }, 1, 1],
+        'base64d' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'base64d', 1, 1);
+            $d = base64_decode(pyhp_strcast_arg($a[0], 'base64d'), true);
+            if ($d === false) throw new PyHPValueError('base64d(): invalid base64 input');
+            return $d;
+        }, 1, 1],
+        'urlenc' => [fn(...$a) => (pyhp_reg_errcheck($a, 'urlenc', 1, 1) ?: rawurlencode(pyhp_strcast_arg($a[0], 'urlenc'))), 1, 1],
+        'urldec' => [fn(...$a) => (pyhp_reg_errcheck($a, 'urldec', 1, 1) ?: rawurldecode(pyhp_strcast_arg($a[0], 'urldec'))), 1, 1],
     ];
 
     return $reg;
+}
+
+/** PHP json_decode(true) structure -> PyHP value (lists/dicts). */
+function pyhp_json_to_val($v) {
+    if (is_array($v)) {
+        $isList = array_is_list($v);
+        if ($isList) { return new PyList(array_map(fn($x) => pyhp_json_to_val($x), $v)); }
+        $d = [];
+        foreach ($v as $k => $x) { $d[$k] = pyhp_json_to_val($x); }
+        return new PyDict($d);
+    }
+    return $v;
+}
+
+/** PyHP value -> PHP structure json_encode understands. */
+function pyhp_val_to_json($v) {
+    if ($v instanceof PyList) {
+        return array_map(fn($x) => pyhp_val_to_json($x), $v->a);
+    }
+    if ($v instanceof PyDict) {
+        $d = [];
+        foreach ($v->d as $k => $x) { $d[(string)$k] = pyhp_val_to_json($x); }
+        return $d;
+    }
+    if (is_object($v) || is_array($v)) {
+        throw new PyHPValueError('json_string(): cannot serialize ' . pyhp_type_name($v));
+    }
+    return $v;
 }
 
 function pyhp_call_builtin(string $name, array $args) {
@@ -1219,3 +1300,408 @@ function pyhp_fn_call(string $name, ...$args) {
 if (!function_exists('str_starts_with')) { function str_starts_with($h, $n) { return strpos($h, $n) === 0; } }
 if (!function_exists('str_ends_with'))   { function str_ends_with($h, $n)   { return $n === '' || substr($h, -strlen($n)) === $n; } }
 if (!function_exists('str_contains'))    { function str_contains($h, $n)    { return $n === '' || strpos($h, $n) !== false; } }
+
+/* =========================================================================
+ * C++ native bridge — `cpp { ... }` blocks in .pyh files.
+ *
+ * A cpp block embeds C++ code. Exported functions are declared with a
+ * `// pyhp-export:` directive giving the exact C signature:
+ *
+ *   cpp {
+ *       // pyhp-export: double pyh_hypot(double a, double b);
+ *       double pyh_hypot(double a, double b) { return sqrt(a*a + b*b); }
+ *   }
+ *
+ * Signatures support int64_t, double, const char* and void — the same C ABI
+ * PyHP uses for its C muscles everywhere.
+ *
+ * Two bridge modes, chosen automatically:
+ *   ffi  — compile to a shared object, load with PHP ext/ffi (fast path)
+ *   exec — compile to a standalone helper binary, call over a tiny
+ *          line protocol (works on every PHP build, needs only g++)
+ * ========================================================================= */
+
+/** Parse `// pyhp-export: <decl>` lines out of a cpp block. Returns a list of
+ *  ['name', 'ret', 'params', 'decl'] where decl is a complete C declaration. */
+function pyhp_cpp_parse_exports(string $raw): array {
+    $out = [];
+    if (!preg_match_all('/pyhp-export:[ \t]*([^\r\n]+?)[ \t]*$/m', $raw, $m)) return $out;
+    foreach ($m[1] as $declLine) {
+        $decl = rtrim(trim($declLine), ';');
+        if ($decl === '') continue;
+        // <ret> <name> ( <params> )
+        if (!preg_match('/^([A-Za-z_][A-Za-z0-9_ \t\*&]*?)\s*(\**)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)$/', $decl, $d)) {
+            throw new PyHPSyntaxError("pyhp-export: cannot parse declaration '{$decl}'");
+        }
+        $ret = trim($d[1] . $d[2]);
+        $name = $d[3];
+        $params = trim($d[4]);
+        $out[] = ['name' => $name, 'ret' => $ret, 'params' => $params, 'decl' => $decl];
+    }
+    return $out;
+}
+
+/** Normalize one C parameter/return type to a bridge kind:
+ *  i = int64_t, d = double, s = const char*, v = void. */
+function pyhp_cpp_type_kind(string $t): string {
+    $t = strtolower(trim($t));
+    $t = preg_replace('/\s+/', ' ', $t);
+    if ($t === 'void' || $t === '') return 'v';
+    if (in_array($t, ['int64_t', 'long long', 'long', 'int', 'ssize_t', 'size_t', 'unsigned', 'int32_t', 'long long int'], true)) return 'i';
+    if (in_array($t, ['double', 'float', 'long double'], true)) return 'd';
+    if (preg_match('/^(const\s+)?(char|unsigned char|uint8_t|int8_t)\s*\**$/', $t) && str_contains($t, '*')) return 's';
+    throw new PyHPSyntaxError("pyhp-export: unsupported type '{$t}' (supported: int64_t, double, const char*, void)");
+}
+
+class PyHPCppNative
+{
+    /** @var array<string, string[]> module id -> raw block sources (in order) */
+    private static array $blocks = [];
+    /** @var array<string, array>|null export name -> ['decl','ret','params'] */
+    private static ?array $exports = null;
+    /** @var array<string, callable> compiled callables */
+    private static array $callables = [];
+    private static ?string $mode = null;      // 'ffi' | 'exec'
+    private static ?string $bin = null;       // compiled helper path
+    private static ?string $so = null;        // compiled shared object path
+    private static $ffi = null;               // FFI instance
+    private static ?string $builtHash = null; // fingerprint of the built code set
+
+    public static function register(string $id, string $code): void {
+        self::$blocks[$id][] = $code;
+        self::$exports = null; // invalidate; rebuilt lazily
+    }
+
+    public static function has(string $name): bool {
+        return isset(self::exportMap()[$name]);
+    }
+
+    /** @return array<string, array> */
+    public static function exportMap(): array {
+        if (self::$exports === null) {
+            self::$exports = [];
+            foreach (self::$blocks as $codes) {
+                foreach ($codes as $raw) {
+                    foreach (pyhp_cpp_parse_exports($raw) as $e) {
+                        self::$exports[$e['name']] = $e;
+                    }
+                }
+            }
+        }
+        return self::$exports;
+    }
+
+    public static function call(string $name, array $args) {
+        $f = self::fn($name);
+        return $f(...$args);
+    }
+
+    public static function fn(string $name): callable {
+        if (isset(self::$callables[$name])) return self::$callables[$name];
+        $map = self::exportMap();
+        if (!isset($map[$name])) {
+            throw new PyHPError("native function '{$name}' is not exported by any cpp block");
+        }
+        self::ensureBuilt();
+        if (self::$mode === 'ffi') {
+            $cdef = self::$ffi;
+            $sig = self::$exports[$name];
+            $kinds = self::paramKinds($sig);
+            self::$callables[$name] = function (...$args) use ($cdef, $name, $kinds) {
+                if (count($args) !== count($kinds)) {
+                    throw new PyHPTypeError("{$name}() takes " . count($kinds) . " argument(s), " . count($args) . " given");
+                }
+                $cargs = [];
+                foreach ($args as $i => $v) { $cargs[] = self::toC($v, $kinds[$i], $name); }
+                $r = $cdef->{$name}(...$cargs);
+                if ($r instanceof \FFI\CData) return \FFI::string($r);
+                if (is_bool($r)) return $r ? 1 : 0;
+                return $r;
+            };
+        } else {
+            $bin = self::$bin;
+            $sig = self::$exports[$name];
+            $kinds = self::paramKinds($sig);
+            self::$callables[$name] = function (...$args) use ($bin, $name, $kinds) {
+                if (count($args) !== count($kinds)) {
+                    throw new PyHPTypeError("{$name}() takes " . count($kinds) . " argument(s), " . count($args) . " given");
+                }
+                return self::execCall($bin, $name, $args, $kinds);
+            };
+        }
+        return self::$callables[$name];
+    }
+
+    /** @return string[] bridge kinds, one per parameter */
+    private static function paramKinds(array $sig): array {
+        $params = trim($sig['params']);
+        if ($params === '' || strtolower($params) === 'void') return [];
+        $kinds = [];
+        foreach (explode(',', $params) as $p) {
+            $t = trim($p);
+            // drop the parameter name: "double x" -> "double", "const char* s" -> "const char*"
+            $t = preg_replace('/\s+[A-Za-z_][A-Za-z0-9_]*$/', '', $t);
+            $kinds[] = pyhp_cpp_type_kind($t);
+        }
+        return $kinds;
+    }
+
+    private static function toC($v, string $kind, string $fn) {
+        switch ($kind) {
+            case 'i':
+                if (is_int($v)) return $v;
+                if (is_float($v) && floor($v) === $v) return (int)$v;
+                throw new PyHPTypeError("{$fn}() expects an int (int64_t) argument, got " . pyhp_type_name($v));
+            case 'd':
+                if (is_int($v) || is_float($v)) return (float)$v;
+                throw new PyHPTypeError("{$fn}() expects a number (double) argument, got " . pyhp_type_name($v));
+            case 's':
+                if (is_string($v)) return $v;
+                throw new PyHPTypeError("{$fn}() expects a string (const char*) argument, got " . pyhp_type_name($v));
+        }
+        throw new PyHPTypeError("{$fn}(): unsupported bridge kind '{$kind}'");
+    }
+
+    /* ---------------- build & call ---------------- */
+
+    private static function cacheDir(): string {
+        $dir = getenv('PYHP_NATIVE_CACHE');
+        if ($dir === false || $dir === '') $dir = (getcwd() ?: '.') . '/.pyhp_native';
+        if (!is_dir($dir)) @mkdir($dir, 0777, true);
+        return $dir;
+    }
+
+    private static function compiler(): string {
+        $c = getenv('CXX');
+        if ($c !== false && $c !== '') return $c;
+        foreach (['g++', 'clang++', 'c++'] as $c) {
+            $out = @shell_exec('command -v ' . escapeshellarg($c) . ' 2>/dev/null');
+            if (is_string($out) && trim($out) !== '') return $c;
+        }
+        throw new PyHPRuntimeError('native cpp blocks need a C++ compiler (g++). Install g++ or set CXX.');
+    }
+
+    /** Compile all registered blocks once. Chooses ffi mode when ext/ffi is
+     *  loaded and active, otherwise the portable exec mode. If the registered
+     *  code set changes after a build (e.g. a second module registers more
+     *  blocks), the build is redone for the new set. */
+    private static function ensureBuilt(): void {
+        $codes = [];
+        foreach (self::$blocks as $list) { foreach ($list as $c) { $codes[] = $c; } }
+        if (count($codes) === 0) throw new PyHPRuntimeError('no cpp blocks registered');
+        $hash = md5(implode("\n;;;\n", $codes) . '|' . PYHP_VERSION);
+        if (self::$mode !== null && self::$builtHash === $hash) return;
+        if (self::$mode !== null) { // code set changed: rebuild from scratch
+            self::$mode = null;
+            self::$bin = null;
+            self::$so = null;
+            self::$ffi = null;
+            self::$callables = [];
+        }
+        $dir = self::cacheDir();
+        $cxx = self::compiler();
+
+        // user code: hoist #include lines outside extern "C", wrap the rest
+        $includes = [];
+        $bodies = [];
+        foreach ($codes as $code) {
+            [$inc, $body] = self::splitIncludes($code);
+            $includes[] = $inc;
+            $bodies[] = $body;
+        }
+
+        $srcFile = $dir . '/pyhp_native_' . $hash . '.cpp';
+        $src = "// C++ source generated by PyHP " . PYHP_VERSION . " — " . $hash . "\n"
+             . "#include <cstdint>\n#include <cstdio>\n#include <cstring>\n#include <cstdlib>\n#include <cmath>\n#include <string>\n"
+             . implode("\n", array_filter($includes)) . "\n"
+             . "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
+             . implode("\n", $bodies) . "\n"
+             . "#ifdef __cplusplus\n}\n#endif\n";
+        file_put_contents($srcFile, $src);
+
+        $useFfi = class_exists('\\FFI');
+        if ($useFfi && function_exists('opcache_get_status')) {
+            $st = @opcache_get_status();
+            $useFfi = is_array($st); // ext/ffi requires opcache to be active
+        }
+        if ($useFfi) {
+            $soFile = $dir . '/pyhp_native_' . $hash . '.so';
+            $cmd = $cxx . ' -O2 -std=c++17 -shared -fPIC -o ' . escapeshellarg($soFile) . ' ' . escapeshellarg($srcFile) . ' 2>&1';
+            exec($cmd, $outLines, $code);
+            if ($code !== 0) {
+                throw new PyHPRuntimeError("native build failed (g++):\n" . implode("\n", array_slice($outLines, 0, 30)));
+            }
+            $decls = implode("\n", array_map(fn($e) => $e['decl'] . ';', array_values(self::exportMap())));
+            try {
+                self::$ffi = \FFI::cdef($decls, $soFile);
+            } catch (\Throwable $t) {
+                throw new PyHPRuntimeError('native FFI load failed: ' . $t->getMessage());
+            }
+            self::$mode = 'ffi';
+            self::$so = $soFile;
+            self::$builtHash = $hash;
+            return;
+        }
+
+        // exec mode: build a standalone helper with a generated dispatcher
+        $mainFile = $dir . '/pyhp_native_' . $hash . '_main.cpp';
+        $binFile = $dir . '/pyhp_native_' . $hash . (PHP_OS_FAMILY === 'Windows' ? '.exe' : '');
+        file_put_contents($mainFile, self::genDispatcher(array_values(self::exportMap())));
+        $needBuild = !is_file($binFile) || filemtime($srcFile) > filemtime($binFile) || filemtime($mainFile) > filemtime($binFile);
+        if ($needBuild) {
+            $tmpBin = $binFile . '.tmp' . getmypid();
+            $cmd = $cxx . ' -O2 -std=c++17 -o ' . escapeshellarg($tmpBin) . ' '
+                 . escapeshellarg($srcFile) . ' ' . escapeshellarg($mainFile) . ' 2>&1';
+            exec($cmd, $outLines, $code);
+            if ($code !== 0) {
+                @unlink($tmpBin);
+                throw new PyHPRuntimeError("native build failed (g++):\n" . implode("\n", array_slice($outLines, 0, 30)));
+            }
+            rename($tmpBin, $binFile);
+        }
+        self::$mode = 'exec';
+        self::$bin = $binFile;
+        self::$builtHash = $hash;
+    }
+
+    /** Split #include lines (kept outside extern "C") from the body. */
+    private static function splitIncludes(string $code): array {
+        $inc = [];
+        $body = [];
+        foreach (preg_split('/\r?\n/', $code) as $line) {
+            $t = ltrim($line);
+            if (str_starts_with($t, '#include') || str_starts_with($t, '# include')) { $inc[] = $line; continue; }
+            $body[] = $line;
+        }
+        return [implode("\n", $inc), implode("\n", $body)];
+    }
+
+    /** Generated main() implementing the exec-mode line protocol. */
+    private static function genDispatcher(array $exports): string {
+        $protos = implode("\n", array_map(fn($e) => 'extern "C" ' . $e['decl'] . ';', $exports));
+        $branches = '';
+        foreach ($exports as $e) {
+            $name = $e['name'];
+            $kinds = self::paramKinds($e);
+            $ret = pyhp_cpp_type_kind($e['ret']);
+            $read = [];
+            $call = [];
+            for ($i = 0; $i < count($kinds); $i++) {
+                $vn = 'a' . $i;
+                switch ($kinds[$i]) {
+                    case 'i': $read[] = "        int64_t {$vn} = pyhp_rt_read_i();"; break;
+                    case 'd': $read[] = "        double {$vn} = pyhp_rt_read_d();"; break;
+                    case 's': $read[] = "        std::string s{$i} = pyhp_rt_read_s();\n        const char* {$vn} = s{$i}.c_str();"; break;
+                }
+                $call[] = $vn;
+            }
+            $callStr = implode(', ', $call);
+            $guard = count($kinds) > 0 ? "pyhp_rt_nargs == " . count($kinds) . " && " : '';
+            switch ($ret) {
+                case 'v': $body = "        {$name}({$callStr});\n        std::printf(\"ok v:\\n\");"; break;
+                case 'i': $body = "        std::printf(\"ok i:%lld\\n\", (long long){$name}({$callStr}));"; break;
+                case 'd': $body = "        std::printf(\"ok d:%s\\n\", pyhp_rt_fmt_d({$name}({$callStr})).c_str());"; break;
+                case 's': $body = "        pyhp_rt_write_s({$name}({$callStr}));"; break;
+                default:  $body = "        std::printf(\"err unsupported return type\\n\");";
+            }
+            $branches .= "    if ({$guard}sym == \"{$name}\") {\n"
+                . implode("\n", $read) . (count($read) > 0 ? "\n" : '')
+                . $body . "\n"
+                . "        return 0;\n    }\n";
+        }
+        return <<<CPP
+// Generated by PyHP {PYHP_VERSION} — native dispatcher. Do not edit.
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <string>
+
+{$protos}
+
+static int64_t pyhp_rt_read_i() {
+    long long v = 0;
+    if (std::scanf("%lld", &v) != 1) { std::printf("err bad int arg\\n"); std::exit(3); }
+    return (int64_t)v;
+}
+static double pyhp_rt_read_d() {
+    char buf[64];
+    if (std::scanf("%63s", buf) != 1) { std::printf("err bad double arg\\n"); std::exit(3); }
+    return std::strtod(buf, nullptr);
+}
+static std::string pyhp_rt_read_s() {
+    long len = 0;
+    if (std::scanf(" s:%ld:", &len) != 1) { std::printf("err bad string arg\\n"); std::exit(3); }
+    std::string out((size_t)len, '\\0');
+    if (len > 0 && std::fread(&out[0], 1, (size_t)len, stdin) != (size_t)len) {
+        std::printf("err truncated string arg\\n"); std::exit(3);
+    }
+    return out;
+}
+static void pyhp_rt_write_s(const char* s) {
+    if (s == nullptr) { std::printf("ok s:0:\\n"); return; }
+    std::printf("ok s:%lu:", (unsigned long)std::strlen(s));
+    std::fwrite(s, 1, std::strlen(s), stdout);
+    std::printf("\\n");
+}
+static std::string pyhp_rt_fmt_d(double d) {
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "%.17g", d);
+    return std::string(buf);
+}
+
+int main(int argc, char** argv) {
+    if (argc < 2) { std::printf("err missing symbol\\n"); return 2; }
+    std::string sym = argv[1];
+    int pyhp_rt_nargs = -1;
+    if (std::scanf("%d", &pyhp_rt_nargs) != 1) { std::printf("err bad request\\n"); return 3; }
+{$branches}    std::printf("err unknown symbol\\n");
+    return 1;
+}
+CPP;
+    }
+
+    /** One call over the exec-mode protocol. */
+    private static function execCall(string $bin, string $name, array $args, array $kinds) {
+        if (!is_file($bin)) throw new PyHPRuntimeError('native helper binary is missing: ' . $bin);
+        $req = count($kinds) . "\n";
+        foreach ($args as $i => $v) {
+            switch ($kinds[$i]) {
+                case 'i': $req .= ((string)(int)self::toC($v, 'i', $name)) . "\n"; break;
+                case 'd': $req .= json_encode((float)self::toC($v, 'd', $name)) . "\n"; break;
+                case 's': $s = (string)self::toC($v, 's', $name); $req .= 's:' . strlen($s) . ':' . $s; break;
+            }
+        }
+        $desc = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+        $proc = @proc_open(escapeshellarg($bin) . ' ' . escapeshellarg($name), $desc, $pipes);
+        if (!is_resource($proc)) throw new PyHPRuntimeError("cannot run native helper for '{$name}'");
+        fwrite($pipes[0], $req);
+        fclose($pipes[0]);
+        $out = (string)stream_get_contents($pipes[1]);
+        $err = (string)stream_get_contents($pipes[2]);
+        fclose($pipes[1]); fclose($pipes[2]);
+        $code = proc_close($proc);
+        $nl = strpos($out, "\n");
+        $line = $nl === false ? $out : substr($out, 0, $nl);
+        if ($code !== 0 || !str_starts_with($line, 'ok ')) {
+            throw new PyHPRuntimeError("native call '{$name}' failed: " . ($line !== '' ? trim($line) : trim($err)));
+        }
+        $payload = substr($line, 3); // after "ok " — e.g. "i:42", "s:12:PyHP native!"
+        if ($payload === 'v:') return null;
+        if (str_starts_with($payload, 'i:')) return (int)substr($payload, 2);
+        if (str_starts_with($payload, 'd:')) return (float)substr($payload, 2);
+        if (str_starts_with($payload, 's:')) {
+            $colon = strpos($payload, ':', 2);
+            $len = (int)substr($payload, 2, $colon - 2);
+            $start = 3 + $colon + 1; // absolute offset of the string bytes in $out
+            return substr($out, $start, $len);
+        }
+        throw new PyHPRuntimeError("native call '{$name}': malformed response");
+    }
+}
+
+/* Public entry points used by the interpreter and transpiled code. */
+function pyhp_cpp_register(string $id, string $code): void { PyHPCppNative::register($id, $code); }
+function pyhp_cpp_has(string $name): bool { return PyHPCppNative::has($name); }
+function pyhp_cpp_call(string $name, array $args) { return PyHPCppNative::call($name, $args); }
+function pyhp_cpp_fn(string $name): callable { return PyHPCppNative::fn($name); }

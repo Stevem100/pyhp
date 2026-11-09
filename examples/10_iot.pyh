@@ -1,0 +1,54 @@
+// PyHP — IoT with the `iot` stdlib module: sensors, smoothing, checksums,
+// JSON telemetry and MQTT-style publish frames.
+// Run:  php bin/pyhp run examples/10_iot.pyh
+// Deploy natively: php bin/pyhp build examples/10_iot.pyh --target native -o /tmp/iot_demo && /tmp/iot_demo
+
+iot = require("iot");
+
+echo "== IoT toolkit ==\n";
+
+// ---- simulate a temperature sensor (deterministic seed) ----
+raw = iot.sensor_sim(42, 12, 21.0, 1.5);
+echo "raw readings   = ", raw, "\n";
+
+// ---- condition the signal ----
+smooth = iot.moving_avg(raw, 4);
+echo "moving avg(4)  = ", smooth, "\n";
+fast = iot.ema(raw, 0.6);
+echo "ema(0.6) last  = ", round(fast[len(fast) - 1], 3), "\n";
+st = iot.rolling_stats(raw);
+echo "stats          = min ", round(st.min, 2), "  max ", round(st.max, 2), "  mean ", round(st.mean, 3), "  std ", round(st.std, 3), "\n";
+
+// ---- alarm thresholds with hysteresis ----
+flags = iot.threshold_flags(raw, 20.0, 22.5);
+echo "threshold flags= ", flags, "\n";
+prev = null;
+debounced = [];
+foreach x in raw {
+    d = iot.deadband(x, prev, 0.4);
+    debounced.append(d);
+    prev = d;
+}
+echo "deadband       = ", debounced, "\n";
+
+// ---- CRC-16/Modbus integrity ----
+echo "crc16('123456789') = ", iot.crc16("123456789"), " (19255 = 0x4B37, the Modbus reference)\n";
+
+// ---- JSON telemetry + MQTT-style publish/subscribe ----
+wire = iot.mqtt_publish("greenhouse/th-1", [round(x, 2) for x in smooth], 1730000000);
+echo "wire frame len = ", len(wire), " bytes-ish chars\n";
+msg = iot.mqtt_consume(wire);              // verifies CRC, then parses
+echo "topic          = ", msg.topic, "\n";
+doc = json_parse(msg.payload);
+echo "device         = ", doc.device, "  ts = ", doc.ts, "\n";
+echo "readings       = ", doc.readings, "\n";
+
+// ---- NDJSON batch for an ingest pipeline ----
+batch = iot.telemetry_batch("greenhouse/th-1", [1, 2, 3, 4, 5], 100, 2);
+echo "batch lines    = ", len(batch.split("\n")) - 1, "\n";
+line = batch.split("\n")[0];
+echo "line 1 parses  = ", iot.parse_telemetry(line).device, "\n";
+
+// round-trip check
+again = iot.mqtt_consume(iot.mqtt_publish("dev", [1.5], 1));
+echo "roundtrip ok   = ", str(again.topic == "dev/telemetry"), "\n";

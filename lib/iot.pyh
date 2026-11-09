@@ -1,0 +1,221 @@
+// iot — IoT / embedded toolkit for PyHP.
+// Sensor conditioning, checksums, telemetry framing and MQTT-style packets.
+// Pure computation so the same code runs on a gateway, in CI, or compiled
+// natively with `pyhp build --target native`. Deterministic on all engines.
+
+// ---------- signal conditioning ----------
+
+function clamp(x, lo, hi) {
+    if x < lo { return lo; }
+    if x > hi { return hi; }
+    return x;
+}
+
+// simple moving average over a window (trailing)
+function moving_avg(xs, w) {
+    if w < 1 {
+        throw ValueError("moving_avg(): window must be >= 1");
+    }
+    out = [];
+    acc = 0.0;
+    for (i = 0; i < len(xs); i++) {
+        acc += xs[i];
+        if i >= w {
+            acc -= xs[i - w];
+        }
+        n = w;
+        if i < w - 1 {
+            n = i + 1;
+        }
+        out.append(acc / n);
+    }
+    return out;
+}
+
+// exponential moving average over a whole series
+function ema(xs, alpha) {
+    if alpha <= 0 || alpha > 1 {
+        throw ValueError("ema(): alpha must be in (0, 1]");
+    }
+    out = [];
+    avg = null;
+    foreach x in xs {
+        if avg == null {
+            avg = x;
+        } else {
+            avg = alpha * x + (1.0 - alpha) * avg;
+        }
+        out.append(avg);
+    }
+    return out;
+}
+
+// rolling statistics snapshot
+function rolling_stats(xs) {
+    if len(xs) == 0 {
+        throw ValueError("rolling_stats(): empty list");
+    }
+    m = 0.0;
+    foreach x in xs { m += x; }
+    m /= len(xs);
+    v = 0.0;
+    foreach x in xs { d = x - m; v += d * d; }
+    v /= len(xs);
+    return {"min": min(xs), "max": max(xs), "mean": m, "std": sqrt(v), "count": len(xs)};
+}
+
+// ignore jitter smaller than eps (hysteresis for noisy sensors)
+function deadband(x, prev, eps) {
+    if prev == null {
+        return x;
+    }
+    if abs(x - prev) < eps {
+        return prev;
+    }
+    return x;
+}
+
+// deterministic simulated sensor stream: base trend + seeded noise
+function sensor_sim(seed, n, base, noise) {
+    r = abs(int(seed)) % 2147483648;
+    out = [];
+    for (i = 0; i < n; i++) {
+        r = (r * 1103515245 + 12345) % 2147483648;
+        jitter = (r % 20001) / 10000.0 - 1.0;   // [-1, 1]
+        out.append(clamp(base + 0.01 * i + noise * jitter, 0.0, 1000.0));
+    }
+    return out;
+}
+
+// flag readings that leave a safe band (list of bools)
+function threshold_flags(xs, lo, hi) {
+    return [x < lo || x > hi for x in xs];
+}
+
+// ---------- checksums ----------
+
+// CRC-16/Modbus (poly 0xA001 reflected, init 0xFFFF) over the characters of s.
+// Check value: crc16("123456789") == 19255 (0x4B37).
+function crc16(s) {
+    crc = 65535;
+    for (i = 0; i < len(s); i++) {
+        crc = crc ^ ord(s[i]);
+        for (b = 0; b < 8; b++) {
+            if crc % 2 == 1 {
+                crc = (crc >> 1) ^ 40961;   // 0xA001
+            } else {
+                crc = crc >> 1;
+            }
+            crc = crc % 65536;
+        }
+    }
+    return crc;
+}
+
+// ---------- telemetry framing ----------
+
+// JSON telemetry line: {"device", "ts", "readings"}
+function telemetry(device, readings, ts) {
+    return json_string({"device": device, "ts": ts, "readings": readings});
+}
+
+// parse a telemetry line back into a dict
+function parse_telemetry(line) {
+    return json_parse(line);
+}
+
+// batch telemetry as NDJSON (newline-delimited JSON), one record per window
+function telemetry_batch(device, xs, ts, window) {
+    lines = [];
+    for (i = 0; i < len(xs); i += window) {
+        chunk = xs[i:i + window];
+        lines.append(telemetry(device, chunk, ts + i));
+    }
+    out = "";
+    foreach l in lines {
+        out += l + "\n";
+    }
+    return out;
+}
+
+// ---------- MQTT-style publish frame ----------
+
+// Build a compact binary publish frame:
+//   [len(topic) as 2 bytes big-endian][topic bytes][len(payload) as 4 bytes][payload]
+// Integers are encoded with chr() so the frame is a plain string everywhere.
+function mqtt_frame(topic, payload) {
+    if len(topic) > 65535 {
+        throw ValueError("mqtt_frame(): topic too long");
+    }
+    lt = len(topic);
+    lp = len(payload);
+    head = "";
+    head += chr(int(lt / 256) % 256);
+    head += chr(lt % 256);
+    tail = "";
+    for (shift = 24; shift >= 0; shift -= 8) {
+        tail += chr(int(lp / pow(2, shift)) % 256);
+    }
+    return head + topic + tail + payload;
+}
+
+// parse a frame produced by mqtt_frame -> {"topic", "payload"}
+function mqtt_parse(frame) {
+    if len(frame) < 6 {
+        throw ValueError("mqtt_parse(): frame too short");
+    }
+    lt = ord(frame[0]) * 256 + ord(frame[1]);
+    if len(frame) < 2 + lt + 4 {
+        throw ValueError("mqtt_parse(): truncated frame");
+    }
+    topic = frame[2:2 + lt];
+    lp = 0;
+    for (b = 0; b < 4; b++) {
+        lp = lp * 256 + ord(frame[2 + lt + b]);
+    }
+    if len(frame) < 2 + lt + 4 + lp {
+        throw ValueError("mqtt_parse(): payload length mismatch");
+    }
+    payload = frame[6 + lt:6 + lt + lp];
+    return {"topic": topic, "payload": payload};
+}
+
+// convenience: JSON payload publish frame with a CRC-16 trailer.
+// The trailer is 4 ASCII hex chars — PyHP strings are Unicode, so sticking
+// to ASCII keeps len()/slicing consistent on every engine and wire format.
+function mqtt_publish(device, readings, ts) {
+    body = telemetry(device, readings, ts);
+    frame = mqtt_frame(device + "/telemetry", body);
+    c = crc16(frame);
+    t = hex(c)[2:];
+    while len(t) < 4 {
+        t = "0" + t;
+    }
+    return frame + t;
+}
+
+// verify + parse a frame made by mqtt_publish -> {"topic", "payload"}
+function mqtt_consume(wire) {
+    if len(wire) < 10 {
+        throw ValueError("mqtt_consume(): wire too short");
+    }
+    body = wire[:len(wire) - 4];
+    want = 0;
+    foreach ch in wire[len(wire) - 4:] {
+        o = ord(ch.lower());
+        d = 0;
+        if o >= 97 && o <= 102 {
+            d = o - 87;
+        } elseif o >= 48 && o <= 57 {
+            d = o - 48;
+        } else {
+            throw ValueError("mqtt_consume(): bad CRC trailer");
+        }
+        want = want * 16 + d;
+    }
+    got = crc16(body);
+    if got != want {
+        throw ValueError("mqtt_consume(): CRC mismatch (got " + str(got) + ", want " + str(want) + ")");
+    }
+    return mqtt_parse(body);
+}

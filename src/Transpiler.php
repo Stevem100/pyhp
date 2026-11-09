@@ -34,6 +34,8 @@ class PyHPTranspiler
     private array $modCache = [];        // realpath => module id
     private array $modStack = [];        // require chain (cycle detection)
     private ?string $sourceDir = null;   // dir of the file being transpiled
+    private array $cppExports = [];      // native export name => true (compile-time known)
+    private int $cppIdN = 0;
 
     /** Point the transpiler at the source file so require() resolves
      *  relative paths and vendor packages against it. */
@@ -321,6 +323,11 @@ class PyHPTranspiler
                 foreach ($s['stmts'] as $st) { $this->emitStmt($st, $L); }
                 $this->indent--;
                 $this->w($L, '}');
+                return;
+            case 'Cpp':
+                $id = 'c' . (++$this->cppIdN);
+                foreach ($s['exports'] as $e) { $this->cppExports[$e['name']] = true; }
+                $this->w($L, 'pyhp_cpp_register(' . var_export($id, true) . ', ' . var_export($s['code'], true) . ');');
                 return;
         }
         throw new PyHPSyntaxError("line {$s['line']}: unsupported statement '{$s['k']}' in compiled mode");
@@ -779,6 +786,11 @@ class PyHPTranspiler
                         return var_export($this->fnPhp($e['name']), true);
                     }
                 }
+                // native cpp export referenced as a value
+                if (isset($this->cppExports[$e['name']])
+                    && !in_array($e['name'], $this->curScope()['assigned'], true)) {
+                    return "pyhp_cpp_fn(" . var_export($e['name'], true) . ")";
+                }
                 return '$' . $e['name'];
             case 'This':
                 return '$this';
@@ -1046,6 +1058,9 @@ class PyHPTranspiler
             }
             if ($this->clsKnown($name)) {
                 return 'new ' . $this->clsPhp($name) . '(' . $this->emitCallArgs($e['args']) . ')';
+            }
+            if (isset($this->cppExports[$name])) {
+                return "pyhp_cpp_call(" . var_export($name, true) . ', [' . $this->emitCallArgs($e['args']) . '])';
             }
             if (isset($map[$name])) {
                 return 'new ' . $map[$name] . '(' . $this->emitCallArgs($e['args']) . ')';

@@ -1,29 +1,37 @@
 # PyHP
 
-> PHP syntax, Python brains, C muscles. PyHP is a dynamically typed scripting
+> PHP syntax, Python brains, C++ muscles. PyHP is a dynamically typed scripting
 > language with a PHP-family syntax (braces, semicolons, `echo`, `foreach`, no
 > `$` before variables), Python semantics (aliasing lists/dicts, slicing with
 > steps, comprehensions, lambdas & closures, classes with `super`, Python
-> truthiness) and C muscles (hex/binary literals, bitwise operators, optional
+> truthiness), C muscles (hex/binary literals, bitwise operators, optional
 > runtime-enforced static types, a malloc/free byte-buffer arena, file/env/exec
-> access).
+> access) and first-class C++ (embed native code with `cpp { ... }` blocks, or
+> compile whole programs to a native binary).
 
-PyHP 0.2.0 runs on any PHP 8.0+ CLI with **two execution engines built from one
-front-end**: a tree-walking interpreter (`pyhp run`, `pyhp repl`) and a
-transpiler that emits standalone PHP 8 (`pyhp build`, `pyhp compile`). The
-29-case test suite runs every program through both engines and requires
-byte-identical output. Source of truth: https://github.com/Stevem100/pyhp
+PyHP 0.3.0 runs on any PHP 8.0+ CLI with **three execution engines built from
+one front-end**: a tree-walking interpreter (`pyhp run`, `pyhp repl`), a
+transpiler that emits standalone PHP 8 (`pyhp build`, `pyhp compile`) and a
+native C++ backend (`pyhp build --target cpp|native` — needs g++/clang++). A
+stdlib ships with the language: `require("ai")` for machine learning,
+`require("sec")` for security research, `require("iot")` for telemetry; plus
+JSON/crypto built-ins (`json_parse`, `json_string`, `md5`, `sha256`, `crc32`,
+`base64e/base64d`, `urlenc/urldec`). The 35-case test suite runs every program
+through the engines and requires byte-identical output. Source of truth:
+https://github.com/Stevem100/pyhp
 
 ## Files in this folder (ai/)
 
 - `pyhp-spec.json` — machine-readable language spec: version, syntax facts,
-  statement kinds, operator table, all 53 builtins with arities, the 15 string
-  methods, 11 list methods, 9 dict methods, module system and package manager
-  rules. Load this first if you need a compact representation.
-- `pyhp-qa.jsonl` — 58 chat-format training pairs (system/user/assistant).
+  statement kinds, operator table, all 62 builtins with arities, the 15 string
+  methods, 11 list methods, 9 dict methods, module/package rules, native-C++
+  facts and the exported functions of the `ai`/`sec`/`iot` stdlib modules.
+  Load this first if you need a compact representation.
+- `pyhp-qa.jsonl` — 75 chat-format training pairs (system/user/assistant).
   Every code output in the answers was captured by actually executing the
-  snippet on the PyHP interpreter — nothing is hallucinated.
-- `pyhp-code.jsonl` — 26 instruction → solution pairs for code-generation
+  snippet on the PyHP interpreter (native-C++ snippets executed with g++ in
+  the loop) — nothing is hallucinated.
+- `pyhp-code.jsonl` — 31 instruction → solution pairs for code-generation
   fine-tuning; every solution was parse-checked and executed, with its verified
   output included as `verifiedOutput`.
 
@@ -48,10 +56,15 @@ byte-identical output. Source of truth: https://github.com/Stevem100/pyhp
 - Modules: `m = require("./lib.pyh")` or `m = require("pkgname")` → dict of the
   module's top-level functions/lambdas/classes; call as `m.fn(x)`, instantiate
   classes as `m.Class(args)`. Cached per path. Packages: `pyhp pkg add mathx`
-  installs into `vendor/`; resolution: ./vendor → $PYHP_REGISTRY → install
-  registry (ships `strings`, `mathx`, `texttable`).
-- CLI: `pyhp run|build|compile|repl|pkg` (or `php bin/pyhp ...`); script args
-  arrive via `argv()`.
+  installs into `vendor/`; resolution: ./vendor → $PYHP_REGISTRY → stdlib
+  `lib/` (`ai`, `sec`, `iot`) → install registry (ships `strings`, `mathx`,
+  `texttable`).
+- Native C++: `cpp { // pyhp-export: double pyh_f(double x); ... }` then call
+  `pyh_f(1.5)` from PyHP — bridge types int64_t/double/const char*/void;
+  compiled lazily with g++, cached in ./.pyhp_native/. Whole-program native
+  build: `pyhp build app.pyh --target native -o app` (no PHP at runtime).
+- CLI: `pyhp run|build [--target php|cpp|native]|compile|repl|pkg` (or
+  `php bin/pyhp ...`); script args arrive via `argv()`.
 
 ## Common pitfalls (verified)
 
@@ -61,3 +74,10 @@ byte-identical output. Source of truth: https://github.com/Stevem100/pyhp
 - `sorted(xs)` has no key parameter yet; write a small selection sort.
 - `echo` adds no newline and no separator; `print` adds both (space + newline).
 - In compiled mode, `require()` needs a literal string; keep modules stateless.
+- `for` requires parentheses: `for (i = 0; i < n; i++)` — and updates may be
+  assignments (`i += 2`).
+- Keyword/named arguments do not exist; pass positionally.
+- Native C++ backend does not support classes, lambdas or try/finally yet —
+  those need the PHP engines (clear compile errors point there).
+- `chr(n)` is Unicode (like the language generally): bytes ≥ 128 encode as
+  multi-byte UTF-8, so byte-level framing should stay ASCII (see iot.mqtt_*).

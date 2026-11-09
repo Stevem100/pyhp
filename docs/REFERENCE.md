@@ -1,16 +1,18 @@
-# PyHP 0.2.0 — Complete Reference
+# PyHP 0.3.0 — Complete Reference
 
 **PHP syntax. Python brains. C muscles.**
 
 Every command, statement, operator, builtin and method in the language —
-verified against the implementation by the 29-case test suite, which runs every
-program through *both* execution engines (interpreter and transpiler) and
-requires byte-identical output.
+verified against the implementation by the 35-case test suite, which runs every
+program through the execution engines (interpreter, PHP transpiler and, where a
+C++ compiler is present, the native C++ backend) and requires byte-identical
+output.
 
 - File extension: `.pyh`
-- Runs on: PHP 8.0+ CLI (no extensions required)
+- Runs on: PHP 8.0+ CLI (no extensions required); native backend needs g++/clang++
 - Engines: `pyhp run` / `pyhp repl` (tree-walking interpreter) ·
-  `pyhp build` / `pyhp compile` (PyHP → PHP 8 transpiler)
+  `pyhp build` / `pyhp compile` (PyHP → PHP 8 transpiler) ·
+  `pyhp build --target cpp|native` (PyHP → C++17 → machine code)
 
 ---
 
@@ -19,6 +21,8 @@ requires byte-identical output.
 ```
 pyhp run     <script.pyh> [args...]      run via the built-in interpreter
 pyhp build   <script.pyh> -o out.php     transpile to a standalone PHP file
+pyhp build   <f.pyh> --target cpp -o app.cpp       emit C++17 source
+pyhp build   <f.pyh> --target native -o app        emit C++17 + g++ -> executable
 pyhp compile <script.pyh> [args...]      transpile + execute (fast path)
 pyhp repl                                start the interactive shell
 pyhp pkg init [name]                     create pyhp.json + src/ stub
@@ -266,7 +270,7 @@ file whose top-level functions/lambdas/classes are its public API. Add it to a
 registry (the bundled `registry/` folder, a shared folder via `PYHP_REGISTRY`,
 or a fork of this repo) — that's the whole process.
 
-## 12. Built-in functions (all 53)
+## 12. Built-in functions (all 62)
 
 Arity is `min..max` (`n` = unlimited).
 
@@ -340,6 +344,17 @@ Arity is `min..max` (`n` = unlimited).
 | `time()` | 0..0 | Unix time as float seconds |
 | `sleep(ms)` | 1..1 | sleep milliseconds |
 
+### JSON, hashing & encoding (AI / security / IoT toolkit)
+| Function | Arity | Description |
+| --- | --- | --- |
+| `json_parse(s)` | 1..1 | JSON text -> PyHP value (lists/dicts); invalid JSON -> `ValueError` |
+| `json_string(v)` | 1..1 | PyHP value -> JSON text (deterministic key order) |
+| `md5(s)` | 1..1 | MD5 hex digest |
+| `sha256(s)` | 1..1 | SHA-256 hex digest (also in the native backend) |
+| `crc32(s)` | 1..1 | CRC-32 (IEEE) hex digest |
+| `base64e(s)` / `base64d(s)` | 1..1 | base64 encode / strict decode |
+| `urlenc(s)` / `urldec(s)` | 1..1 | RFC 3986 percent-encode / decode |
+
 ### Memory arena ("C DNA")
 | Function | Arity | Description |
 | --- | --- | --- |
@@ -407,8 +422,9 @@ Callables stored in a dict are also dot-callable: `ops = {"twice": lambda s: s +
 
 ## 17. Engine parity
 
-The test suite (`php tests/run_tests.php`, 29 cases) executes every program on
-both engines and requires byte-identical output. The only known divergences:
+The test suite (`php tests/run_tests.php`, 35 cases) executes every program on
+both PHP engines (plus the native backend where g++ exists) and requires
+byte-identical output. The only known divergences:
 
 | Case | Interpreter | Compiled |
 | --- | --- | --- |
@@ -416,8 +432,113 @@ both engines and requires byte-identical output. The only known divergences:
 | module functions reading module-level variables | works | not supported — keep modules stateless |
 | `catch` of a class defined in another module | matches by name | falls back to generic catch |
 
+## 18. C++ native blocks — `cpp { ... }`
+
+Embed real C++ inside a `.pyh` file. Functions declared with a
+`// pyhp-export:` directive become callable from PyHP. The bridge speaks the
+classic C ABI: `int64_t`, `double`, `const char*` and `void` in any position.
+
+```c
+cpp {
+    // pyhp-export: double pyh_hypot(double a, double b);
+    double pyh_hypot(double a, double b) { return sqrt(a*a + b*b); }
+}
+
+echo pyh_hypot(3, 4), "\n";     // 5.0 — raw machine code
+```
+
+Rules:
+
+- The block is C++17. Common headers (`<cstdint> <cmath> <cstdio> <cstring>
+  <cstdlib> <string>`) are pre-included; add your own `#include` lines inside
+  the block.
+- Export names are global across the whole program — prefix them, e.g.
+  `pyh_mymod_func`.
+- Argument/return kinds are fixed by the `pyhp-export` declaration; passing a
+  float where `int64_t` is declared raises `TypeError`.
+- Compilation is lazy (first call), cached in `./.pyhp_native/` (override with
+  `PYHP_NATIVE_CACHE`), and needs a C++ compiler (`g++`, `clang++` or `c++`;
+  override with `CXX`).
+- Bridge mode is picked automatically: **FFI** (shared object loaded with PHP
+  ext/ffi, when available) or **exec** (a standalone helper binary driven over
+  a tiny line protocol — works on every PHP build).
+- Works in ALL engines: interpreter, PHP transpiler, and the native C++ backend
+  (where the block is pasted straight into the generated program).
+
+## 19. Native C++ backend — `pyhp build --target cpp|native`
+
+PyHP compiles to a single self-contained C++17 file implementing the whole
+value model (aliasing lists/dicts, Python semantics, f-strings,
+comprehensions, try/catch, modules, native cpp blocks) with no PHP involved:
+
+```
+pyhp build app.pyh --target cpp    -o app.cpp   # inspect/edit the C++ source
+g++ -O2 -std=c++17 -o app app.cpp               # or let PyHP do it:
+pyhp build app.pyh --target native -o app       # emit + compile
+./app arg1 arg2                                 # argv() works
+```
+
+Supported: variables, all operators, strings + 15 methods, lists/dicts +
+methods, slicing, f-strings, comprehensions, top-level functions (recursion,
+defaults, variadics), top-level function references as values (`map(len, xs)`),
+`foreach`/`while`/`do`/`for`, `try`/`catch`/`throw`, `require()` of modules and
+stdlib, `cpp { ... }` blocks, and most builtins (`print len range map filter
+sorted sum abs min max sqrt round chr ord hex bin json_parse json_string
+base64e/base64d urlenc/urldec sha256 file_read/file_write argv exit time ...`).
+
+Not yet in the native backend (clear compile errors — use the PHP engines):
+classes & `super`, lambdas/function expressions, `try/finally`, `md5`/`crc32`,
+`exec`/`system`/`env`/`sleep`/`input`/`malloc_arena`, `isinstance` of classes.
+Dict keys are stored with an internal marker (int and string keys stay
+distinct); string keys beginning with `\x01` are reserved.
+
+## 20. Standard library — `ai`, `sec`, `iot`
+
+Modules ship with the language in `lib/` and load with
+`m = require("ai");` — no package install needed. All functions are pure and
+deterministic (seeded LCGs, no wall-clock), so output is byte-identical on
+every engine.
+
+### `ai` — machine learning
+| Function | Purpose |
+| --- | --- |
+| `dot` `euclid` `manhattan` `cosine` | vector algebra & distances |
+| `mean` `variance` `stdev` `median` | statistics |
+| `minmax` `standardize` | feature scaling |
+| `train_test_split(xs, ratio, seed)` | deterministic split |
+| `rng_next(state)` `rand_list(seed, n)` | seeded pseudo-random floats |
+| `linear_fit(xs, ys, lr, epochs)` / `linear_predict` | gradient-descent regression |
+| `sigmoid` `relu` | activations |
+| `accuracy` `mse` `mae` `r2` | metrics |
+| `kmeans(points, k, iters)` / `nearest_centroid` | clustering |
+| `matmul` `transpose` | linear algebra |
+
+### `sec` — security research (CTF / authorized pentest labs)
+| Function | Purpose |
+| --- | --- |
+| `xor_cipher` `caesar` `rot13` `vigenere` `vigenere_dec` | classical ciphers |
+| `crack_caesar(cipher)` | brute force + English chi-square scoring |
+| `english_score` `char_freq` `entropy` `log2` | cryptanalysis helpers |
+| `hexdump` | classic 16-byte dump with ASCII gutter |
+| `ip_to_int` `int_to_ip` `subnet(cidr)` `host_range` | network math |
+| `password_gen(len, seed)` `hash_file(path)` | generators & file hashing |
+
+### `iot` — sensors, telemetry & framing
+| Function | Purpose |
+| --- | --- |
+| `clamp` `moving_avg` `ema` `median` `deadband` `rolling_stats` | signal conditioning |
+| `threshold_flags` | alarm bands |
+| `sensor_sim(seed, n, base, noise)` | deterministic sensor streams |
+| `crc16` | CRC-16/Modbus |
+| `telemetry` `parse_telemetry` `telemetry_batch` | JSON / NDJSON telemetry |
+| `mqtt_frame` `mqtt_parse` `mqtt_publish` `mqtt_consume` | MQTT-style frames with CRC trailers |
+
+Domain walkthroughs live in [`guides/AI-DEVELOPMENT.md`](guides/AI-DEVELOPMENT.md),
+[`guides/SECURITY-RESEARCH.md`](guides/SECURITY-RESEARCH.md) and
+[`guides/IOT.md`](guides/IOT.md).
+
 ---
 
-*This reference describes PyHP 0.2.0. Machine-readable versions for AI
+*This reference describes PyHP 0.3.0. Machine-readable versions for AI
 tooling live in [`ai/pyhp-spec.json`](../ai/pyhp-spec.json) and
 [`ai/llms.txt`](../ai/llms.txt).*

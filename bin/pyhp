@@ -26,6 +26,8 @@ PyHP {$v} — PHP syntax, Python brains, C muscles.
 
   pyhp run <script.pyh> [args...]      run via the built-in interpreter
   pyhp build <script.pyh> -o out.php   transpile to a standalone PHP file
+  pyhp build <f.pyh> --target cpp -o app.cpp    transpile to C++17 source
+  pyhp build <f.pyh> --target native -o app     transpile + g++ -> native binary
   pyhp compile <script.pyh> [args...]  transpile + run (fast path)
   pyhp repl                            start the interactive shell
   pyhp pkg init|add|remove|list        manage packages (vendor/ + pyhp.json)
@@ -83,13 +85,36 @@ function pyhp_run_file(string $path, array $scriptArgs): int {
 /* transpile + compile-run                                           */
 /* ----------------------------------------------------------------- */
 
-function pyhp_build_file(string $path, string $out): int {
+function pyhp_build_file(string $path, string $out, string $target = 'php'): int {
     if (!is_file($path)) {
         fwrite(STDERR, "PyHP: cannot find script '{$path}'\n");
         return 1;
     }
     try {
         $stmts = PyHPParser::parseSource(file_get_contents($path));
+        if ($target === 'cpp' || $target === 'native') {
+            require_once __DIR__ . '/../src/CppTranspiler.php';
+            $t = new PyHPCppTranspiler();
+            $t->setSourceFile($path);
+            $cpp = $t->transpile($stmts);
+            if ($target === 'cpp') {
+                file_put_contents($out, $cpp);
+                echo "compiled {$path} -> {$out} (C++17 source; build with: g++ -O2 -std=c++17 -o app " . basename($out) . ")\n";
+                return 0;
+            }
+            $cxx = getenv('CXX') ?: 'g++';
+            $tmpCpp = (is_dir(dirname($out)) ? $out : getcwd() . '/' . $out) . '.tmp.cpp';
+            file_put_contents($tmpCpp, $cpp);
+            $cmd = $cxx . ' -O2 -std=c++17 -o ' . escapeshellarg($out) . ' ' . escapeshellarg($tmpCpp) . ' 2>&1';
+            exec($cmd, $lines, $code);
+            @unlink($tmpCpp);
+            if ($code !== 0) {
+                fwrite(STDERR, "PyHP: native build failed ({$cxx}):\n" . implode("\n", array_slice($lines, 0, 40)) . "\n");
+                return 1;
+            }
+            echo "compiled {$path} -> {$out} (native executable)\n";
+            return 0;
+        }
         $t = new PyHPTranspiler();
         $t->setSourceFile($path);
         $php = $t->transpile($stmts, $out);
@@ -424,17 +449,23 @@ if ($cmd === 'run') {
     exit(pyhp_run_file($argv[2], array_slice($argv, 3)));
 }
 if ($cmd === 'build') {
-    $file = null; $out = null;
+    $file = null; $out = null; $target = 'php';
     $rest = array_slice($argv, 2);
     for ($i = 0; $i < count($rest); $i++) {
         if ($rest[$i] === '-o' && isset($rest[$i + 1])) { $out = $rest[$i + 1]; $i++; }
+        elseif ($rest[$i] === '--target' && isset($rest[$i + 1])) { $target = strtolower($rest[$i + 1]); $i++; }
+        elseif (str_starts_with($rest[$i], '--target=')) { $target = strtolower(substr($rest[$i], 9)); }
         else { $file = $rest[$i]; }
     }
     if ($file === null || $out === null) {
-        fwrite(STDERR, "usage: pyhp build <script.pyh> -o <out.php>\n");
+        fwrite(STDERR, "usage: pyhp build <script.pyh> -o <out> [--target php|cpp|native]\n");
         exit(1);
     }
-    exit(pyhp_build_file($file, $out));
+    if (!in_array($target, ['php', 'cpp', 'native'], true)) {
+        fwrite(STDERR, "pyhp build: unknown target '{$target}' (php, cpp or native)\n");
+        exit(1);
+    }
+    exit(pyhp_build_file($file, $out, $target));
 }
 if ($cmd === 'compile') {
     if (!isset($argv[2])) { fwrite(STDERR, "usage: pyhp compile <script.pyh> [args...]\n"); exit(1); }

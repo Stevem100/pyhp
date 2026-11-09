@@ -270,6 +270,9 @@ class PyHPInterpreter
             case 'Echo':
                 foreach ($s['args'] as $a) { echo pyhp_tostr($this->evalExpr($a, $env)); }
                 return;
+            case 'Cpp':
+                PyHPCppNative::register($this->classNs !== '' ? $this->classNs : 'main', $s['code']);
+                return;
             case 'Block':
                 $this->execStmts($s['stmts'], $env);
                 return;
@@ -875,6 +878,9 @@ class PyHPInterpreter
             }
             if (pyhp_builtin_exists($name)) {
                 return pyhp_call_builtin($name, $args);
+            }
+            if (PyHPCppNative::has($name)) { // native cpp export (lazy compile on first call)
+                return PyHPCppNative::call($name, $args);
             }
             throw new PyHPError("line {$e['line']}: undefined function '{$name}'");
         }

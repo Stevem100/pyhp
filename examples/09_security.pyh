@@ -1,0 +1,47 @@
+// PyHP — security research with the `sec` stdlib module.
+// CTF-friendly ciphers, entropy, hexdumps and network math.
+// Run:  php bin/pyhp run examples/09_security.pyh
+// Use only on systems you are authorized to test.
+
+sec = require("sec");
+
+echo "== security toolkit ==\n";
+
+// ---- classical ciphers ----
+ciphertext = sec.caesar("The quick brown fox jumps over the lazy dog", 7);
+echo "caesar(7)  = ", ciphertext, "\n";
+cracked = sec.crack_caesar(ciphertext);
+echo "cracked    = ", cracked.plaintext, " (shift ", cracked.shift, ")\n";
+echo "rot13      = ", sec.rot13("PyHP speaks C"), "\n";
+vig = sec.vigenere("ATTACKATDAWN", "LEMON");
+echo "vigenere   = ", vig, " -> back = ", sec.vigenere_dec(vig, "LEMON"), "\n";
+xor = sec.xor_cipher("hidden message", "key");
+echo "xor twice  = ", sec.xor_cipher(xor, "key"), "\n";
+
+// ---- analysis: which string carries structured data? ----
+samples = {"plain": "hello world", "random": "x7$Q#mZ!2", "json": '{"a":1,"b":2}'};
+foreach name in keys(samples) {
+    h = sec.entropy(samples[name]);
+    echo "entropy(", name, ") = ", round(h, 3), " bits/char\n";
+}
+echo "hexdump:\n", sec.hexdump("GET /flag HTTP/1.1"), "\n";
+
+// ---- network math ----
+net = sec.subnet("10.0.5.130/26");
+echo "subnet     = ", net.network, "/", net.prefix, "  mask ", net.mask, "\n";
+echo "hosts      = ", net.hosts, "  range ", net.first, " .. ", net.last, "\n";
+echo "10.0.0.1 -> ", sec.ip_to_int("10.0.0.1"), " -> back ", sec.int_to_ip(sec.ip_to_int("10.0.0.1")), "\n";
+
+// ---- hashing & passwords ----
+echo "sha256(\"pyhp\") = ", sha256("pyhp"), "\n";
+echo "md5(\"pyhp\")    = ", md5("pyhp"), "\n";
+for (i = 1; i <= 3; i++) {
+    echo "password(", i, ") = ", sec.password_gen(14, i), "\n";
+}
+echo "base64  = ", base64e("agent:007"), " -> ", base64d(base64e("agent:007")), "\n";
+echo "urlenc  = ", urlenc("q=brute force&safe=off"), "\n";
+
+// ---- frequency analysis finds the shift ----
+freq = sec.char_freq("mississippi");
+top = freq[len(freq) - 1];
+echo "most common letter in 'mississippi': '", top[0], "' x", top[1], "\n";

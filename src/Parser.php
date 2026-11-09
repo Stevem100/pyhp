@@ -6,7 +6,7 @@
  * Expressions: Num Str FStr Bool Null Var This Super List Dict Comp Bin Un Post
  *              Ternary Call Idx Slice Member Assign Func
  * Statements:  Expr VarDecl Func Class If While DoWhile For Foreach Try Throw
- *              Return Break Continue Echo Block
+ *              Return Break Continue Echo Block Cpp
  */
 
 require_once __DIR__ . '/Lexer.php';
@@ -83,6 +83,13 @@ class PyHPParser
 
         if ($this->atKw('function')) return $this->parseFuncDecl(true);
         if ($this->atKw('class')) return $this->parseClass();
+        // cpp { ... } — raw C++ native block (the lexer hands us the raw source)
+        if ($this->at('CPP')) {
+            $tok = $this->adv();
+            $exports = pyhp_cpp_parse_exports($tok['v']);
+            foreach ($exports as $e) { pyhp_cpp_type_kind($e['ret']); } // validate early
+            return ['k' => 'Cpp', 'code' => $tok['v'], 'exports' => $exports, 'line' => $line];
+        }
         if ($this->atKw('if')) return $this->parseIf();
         if ($this->atKw('while')) return $this->parseWhile();
         if ($this->atKw('do')) return $this->parseDoWhile();
@@ -330,10 +337,10 @@ class PyHPParser
         $this->expectOp(';');
         $update = null;
         if (!$this->atOp(')')) {
-            $update = $this->parseExpression();
+            $update = $this->parseForUpdatePart();
             while ($this->atOp(',')) {
                 $this->pos++;
-                $nxt = $this->parseExpression();
+                $nxt = $this->parseForUpdatePart();
                 $update = ['k' => 'Bin', 'op' => ',', 'l' => $update, 'r' => $nxt, 'line' => $line];
             }
         }
@@ -342,6 +349,19 @@ class PyHPParser
         $body = $this->parseBlock();
         $this->loopDepth--;
         return ['k' => 'For', 'init' => $init, 'cond' => $cond, 'update' => $update, 'body' => $body, 'line' => $line];
+    }
+
+    /** for-update part: expression or assignment (i++, i += 2, arr[k] = v). */
+    private function parseForUpdatePart(): array {
+        $line = $this->line();
+        $e = $this->parseExpression();
+        if ($this->at('OP') && in_array($this->toks[$this->pos]['v'], self::ASSIGN_OPS, true)) {
+            if (!in_array($e['k'], ['Var', 'Idx', 'Member'], true)) $this->err('invalid assignment target');
+            $op = $this->adv()['v'];
+            $rhs = $this->parseExpression();
+            return ['k' => 'Assign', 'target' => $e, 'op' => $op, 'value' => $rhs, 'line' => $line];
+        }
+        return $e;
     }
 
     private function parseForeach(): array {

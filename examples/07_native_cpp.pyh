@@ -1,0 +1,51 @@
+// PyHP — native C++ blocks: drop real C++ right into a .pyh file.
+// Run:  php bin/pyhp run examples/07_native_cpp.pyh
+// Or compile EVERYTHING (PyHP + the C++ below) to one native binary:
+//       php bin/pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_native && /tmp/pyhp_native
+//
+// Exported functions are declared with a `// pyhp-export:` line. The bridge
+// supports int64_t, double and const char* — the classic C ABI.
+
+cpp {
+    // pyhp-export: int64_t pyh_fib(int64_t n);
+    // pyhp-export: double pyh_hypot(double a, double b);
+    // pyhp-export: int64_t pyh_popcount(int64_t x);
+    // pyhp-export: const char* pyh_mood(int64_t k);
+
+    int64_t pyh_fib(int64_t n) {           // O(n) iterative Fibonacci
+        if (n < 2) return n;
+        int64_t a = 0, b = 1;
+        for (int64_t i = 1; i < n; i++) { int64_t t = a + b; a = b; b = t; }
+        return b;
+    }
+    double pyh_hypot(double a, double b) { return sqrt(a * a + b * b); }
+    int64_t pyh_popcount(int64_t x) {      // Brian Kernighan bit trick
+        int64_t c = 0;
+        while (x) { x &= x - 1; c++; }
+        return c;
+    }
+    const char* pyh_mood(int64_t k) {
+        static const char* moods[] = {"sleepy", "warm", "fast", "blazing"};
+        return moods[k % 4];
+    }
+}
+
+echo "== native C++ inside PyHP ==\n";
+echo "pyh_fib(70)     = ", pyh_fib(70), "\n";
+echo "pyh_hypot(3,4)  = ", pyh_hypot(3, 4), "\n";
+echo "pyh_popcount(255) = ", pyh_popcount(255), "\n";
+echo "engine mood     = ", pyh_mood(3), "\n";
+
+// native calls mix freely with pure PyHP code
+function pyfib(n) {
+    if n < 2 { return n; }
+    return pyfib(n - 1) + pyfib(n - 2);
+}
+echo "pyhp fib(15)    = ", pyfib(15), "\n";
+
+// and they work through modules and the package manager too
+m = require("./06_helper.pyh");
+echo "module + native = ", m.shout(pyh_mood(2)), "\n";
+echo "\n(The first native call compiles the cpp block once with g++, then\n";
+echo " every call afterwards is raw machine code. Try --target native to\n";
+echo " fuse PyHP and C++ into a single executable with zero PHP involved.)\n";

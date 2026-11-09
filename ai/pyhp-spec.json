@@ -1,12 +1,41 @@
 {
     "language": "PyHP",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "tagline": "PHP syntax, Python brains, C muscles.",
     "fileExtension": ".pyh",
     "runtime": "PHP 8.0+ CLI, no extensions",
     "engines": {
         "interpreter": "tree-walking AST evaluator (pyhp run / pyhp repl)",
-        "transpiler": "PyHP -> standalone PHP 8 (pyhp build / pyhp compile); both engines must produce byte-identical output"
+        "transpiler": "PyHP -> standalone PHP 8 (pyhp build / pyhp compile)",
+        "nativeCpp": "PyHP -> single-file C++17 -> machine code (pyhp build --target cpp|native)",
+        "parity": "the 35-case test suite asserts byte-identical output across engines"
+    },
+    "nativeCpp": {
+        "cppBlocks": "cpp { ... } embeds C++17 in a .pyh file; functions declared with `// pyhp-export: <C decl>;` become callable from PyHP",
+        "bridgeTypes": [
+            "int64_t",
+            "double",
+            "const char*",
+            "void"
+        ],
+        "exportExample": "// pyhp-export: double pyh_hypot(double a, double b);",
+        "bridgeModes": "PHP ext/ffi when available, else a compiled helper binary driven over a tiny line protocol (needs only g++)",
+        "cache": "./.pyhp_native/ (override with PYHP_NATIVE_CACHE, compiler with CXX)",
+        "nativeBackend": "pyhp build --target cpp -o app.cpp emits C++17; --target native -o app also compiles with g++",
+        "nativeSupports": "full value model, operators, methods, slicing, f-strings, comprehensions, top-level functions, foreach/while/for, try/catch/throw, require() of modules and stdlib, cpp blocks, sha256, json, base64/url builtins",
+        "nativeNotYet": [
+            "classes & super",
+            "lambda/function expressions",
+            "try/finally",
+            "md5/crc32",
+            "exec/system/env/sleep/input/malloc_arena",
+            "isinstance of classes"
+        ],
+        "rules": [
+            "export names are global — prefix them (pyh_mymod_fn)",
+            "first call compiles once, later calls are raw machine code",
+            "argument kinds are enforced at call time (TypeError on mismatch)"
+        ]
     },
     "lexical": {
         "comments": [
@@ -132,7 +161,8 @@
         "try/catch/finally",
         "throw",
         "varDecl (int x = 5;)",
-        "expression statement"
+        "expression statement",
+        "cpp { ... } (native C++ block)"
     ],
     "functions": {
         "declaration": "function name(a, b = 5) { ... }",
@@ -166,6 +196,7 @@
         "resolution": [
             "./vendor/<pkg>",
             "$PYHP_REGISTRY/<pkg>",
+            "<install>/lib/<name>.pyh (stdlib)",
             "<install>/registry/<pkg>"
         ],
         "compiledMode": "spec must be a literal string; modules are inlined at build time",
@@ -180,6 +211,84 @@
             "pyhp pkg list"
         ],
         "vendorDir": "vendor/"
+    },
+    "stdlib": {
+        "ai": {
+            "load": "m = require(\"ai\");",
+            "functions": [
+                "accuracy",
+                "cosine",
+                "dot",
+                "euclid",
+                "kmeans",
+                "linear_fit",
+                "linear_predict",
+                "mae",
+                "manhattan",
+                "matmul",
+                "mean",
+                "median",
+                "minmax",
+                "mse",
+                "nearest_centroid",
+                "r2",
+                "rand_list",
+                "relu",
+                "rng_next",
+                "sigmoid",
+                "standardize",
+                "stdev",
+                "train_test_split",
+                "transpose",
+                "variance"
+            ],
+            "deterministic": true
+        },
+        "sec": {
+            "load": "m = require(\"sec\");",
+            "functions": [
+                "_ln",
+                "caesar",
+                "char_freq",
+                "crack_caesar",
+                "english_score",
+                "entropy",
+                "hash_file",
+                "hexdump",
+                "host_range",
+                "int_to_ip",
+                "ip_to_int",
+                "log2",
+                "password_gen",
+                "rot13",
+                "subnet",
+                "vigenere",
+                "vigenere_dec",
+                "xor_cipher"
+            ],
+            "deterministic": true
+        },
+        "iot": {
+            "load": "m = require(\"iot\");",
+            "functions": [
+                "clamp",
+                "crc16",
+                "deadband",
+                "ema",
+                "moving_avg",
+                "mqtt_consume",
+                "mqtt_frame",
+                "mqtt_parse",
+                "mqtt_publish",
+                "parse_telemetry",
+                "rolling_stats",
+                "sensor_sim",
+                "telemetry",
+                "telemetry_batch",
+                "threshold_flags"
+            ],
+            "deterministic": true
+        }
     },
     "builtins": [
         {
@@ -446,6 +555,51 @@
             "name": "malloc_arena",
             "minArgs": 0,
             "maxArgs": 0
+        },
+        {
+            "name": "json_parse",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "json_string",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "md5",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "sha256",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "crc32",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "base64e",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "base64d",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "urlenc",
+            "minArgs": 1,
+            "maxArgs": 1
+        },
+        {
+            "name": "urldec",
+            "minArgs": 1,
+            "maxArgs": 1
         }
     ],
     "stringMethods": [

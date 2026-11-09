@@ -1,4 +1,4 @@
-# PyHP 0.2.0
+# PyHP 0.3.0
 
 **PHP syntax. Python brains. C muscles.**
 
@@ -9,16 +9,20 @@ PyHP is a small dynamically-typed scripting language that fuses three bloodlines
 | **PHP** | familiar syntax — braces, semicolons, `echo`, `foreach`, `$`-free variables |
 | **Python** | lists & dicts that alias like objects, slicing with steps, comprehensions, lambdas & closures, rich builtins, string/list/dict methods, classes with `super`, Python-style truthiness |
 | **C** | hex/binary literals, bitwise operators, optional static type annotations, a deterministic `malloc`/`free` byte-buffer arena, file I/O and shell escape hatches |
+| **C++** | first-class: embed real C++ with `cpp { ... }` blocks, and compile whole programs to a native executable |
 
-PyHP ships with **two execution paths** built from the same front-end:
+PyHP ships with **three execution paths** built from the same front-end:
 
 1. **Our own interpreter** — a hand-written lexer → recursive-descent parser → AST → tree-walking evaluator (`pyhp run`, `pyhp repl`).
 2. **A transpiler** — PyHP → clean, standalone PHP 8 source (`pyhp build` / `pyhp compile`) that runs natively and requires only `src/runtime.php`.
+3. **A native C++ backend** — PyHP → single-file C++17 → machine code (`pyhp build --target cpp|native`). Your embedded `cpp { ... }` blocks go straight into the binary: no PHP, no interpreter, no FFI.
 
-Both paths share the exact same data model, so the 29-case test suite passes every program through *both* engines and asserts byte-identical output.
+All paths share the exact same data model, so the 35-case test suite passes every program through the engines and asserts byte-identical output.
 
-New in 0.2.0: **modules** (`require()`), a **package manager** (`pyhp pkg`) with a bundled
-registry, and a complete AI training kit in [`ai/`](ai/). See [CHANGELOG.md](CHANGELOG.md).
+New in 0.3.0: **C++ native blocks + a native C++ backend**, a **stdlib** with
+`ai` (machine learning), `sec` (security research) and `iot` (telemetry &
+framing) modules, JSON/crypto built-ins, and domain guides in
+[`docs/guides/`](docs/guides/). See [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -50,12 +54,22 @@ php hello.php extra cli args   # -> available as argv()
 # interactive shell
 php bin/pyhp repl
 
-# run the test suite (29 cases x 2 engines)
+# run the test suite (35 cases across all engines)
 php tests/run_tests.php
 
 # packages: install from the bundled registry, then require()
 php bin/pyhp pkg add mathx
 php bin/pyhp run examples/pkg-demo/main.pyh
+
+# C++ inside PyHP, then everything compiled to a native binary
+php bin/pyhp run examples/07_native_cpp.pyh
+php bin/pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_demo
+/tmp/pyhp_demo
+
+# domain toolkits ship with the language — no install step
+php bin/pyhp run examples/08_ai_ml.pyh        # machine learning
+php bin/pyhp run examples/09_security.pyh     # security research toolkit
+php bin/pyhp run examples/10_iot.pyh          # IoT telemetry & framing
 ```
 
 ### REPL in 60 seconds
@@ -159,6 +173,29 @@ arena.used(); arena.free();        // use-after-free and double-free raise MemEr
 file_write("log.txt", "started\n");
 res = exec("uname -s");            // {stdout, code} — shell escape hatch
 print(res["stdout"]);
+
+// ---- C++ native blocks (works in every engine) ----
+cpp {
+    // pyhp-export: int64_t pyh_fib(int64_t n);
+    int64_t pyh_fib(int64_t n) {
+        if (n < 2) return n;
+        int64_t a = 0, b = 1;
+        for (int64_t i = 1; i < n; i++) { int64_t t = a + b; a = b; b = t; }
+        return b;
+    }
+}
+echo pyh_fib(90), "\n";            // raw machine code
+
+// ---- stdlib: AI / security / IoT ----
+ai  = require("ai");
+sec = require("sec");
+iot = require("iot");
+model  = ai.linear_fit([0, 1, 2, 3], [1, 3, 5, 7], 0.05, 2000);
+net    = sec.subnet("10.0.5.130/26");
+reads  = iot.sensor_sim(42, 8, 21.0, 1.5);
+wire   = iot.mqtt_publish("th-1", reads, time());
+doc    = iot.mqtt_consume(wire);   // CRC-verified
+json   = json_string({"ok": true, "w": model.w});
 exit(0);
 ```
 
@@ -195,7 +232,7 @@ Annotate variables, parameters and return types: `int float string bool list dic
 
 ### Builtins
 
-`print println echo` · `len range map filter zip enumerate sorted reversed sum min max any all abs floor ceil round sqrt pow rand` · `int float str bool list dict type repr isinstance` · `chr ord hex bin` · `keys values items` · `file_* exec system env argv exit time sleep input` · `malloc_arena`.
+`print println echo` · `len range map filter zip enumerate sorted reversed sum min max any all abs floor ceil round sqrt pow rand` · `int float str bool list dict type repr isinstance` · `chr ord hex bin` · `keys values items` · `json_parse json_string` · `md5 sha256 crc32 base64e base64d urlenc urldec` · `file_* exec system env argv exit time sleep input` · `malloc_arena`.
 
 ### Error hierarchy
 
@@ -221,17 +258,19 @@ Both engines enforce argument arity and type errors themselves (no reliance on P
 ## Architecture
 
 ```
-bin/pyhp          CLI: run | build | compile | repl | pkg | test entry points
-src/Lexer.php     source -> tokens (f-strings lexed into parts)
-src/Parser.php    tokens -> AST (recursive descent, ~35 node kinds)
+bin/pyhp          CLI: run | build (--target php|cpp|native) | compile | repl | pkg
+src/Lexer.php     source -> tokens (f-strings, raw `cpp { ... }` blocks)
+src/Parser.php    tokens -> AST (recursive descent, ~36 node kinds)
 src/Interpreter.php  AST -> PyHPEnv scopes, signals, classes (our own interpreter)
 src/Transpiler.php   AST -> PHP 8 source
+src/CppTranspiler.php AST -> C++17 (single self-contained file, native backend)
 src/runtime.php   shared data model: PyList/PyDict, errors, arena/buffers,
-                  builtin registry, value helpers (str/repr/compare/slice...)
-examples/         six runnable tours + examples/pkg-demo (packages in action)
+                  builtin registry, value helpers, the C++ native bridge
+lib/              stdlib: ai.pyh (ML), sec.pyh (security), iot.pyh (telemetry)
+examples/         ten runnable tours + examples/pkg-demo (packages in action)
 registry/         bundled package registry: strings, mathx, texttable
-tests/run_tests.php  29 cases, each asserted in interpreter AND compiled mode
-docs/REFERENCE.md complete language reference
+tests/run_tests.php  35 cases, asserted across interpreter, compiled and native
+docs/REFERENCE.md complete language reference + docs/guides/ (AI, security, IoT)
 ai/               llms.txt + pyhp-spec.json + verified JSONL training data
 tools/            build_ai_data.php — regenerates the AI kit from the live engine
 ```
@@ -260,6 +299,8 @@ primary     = INT | FLOAT | STRING | FSTRING | "true" | "false" | "null" | ident
 
 * keyword arguments in calls, `sorted(xs, key=f)`
 * class exports across modules + module-level state in compiled mode
+* classes and lambdas in the native C++ backend (currently PHP-engine only)
+* list/float types across the C++ bridge (currently int64_t/double/const char*)
 * string interpolation format specs (`{x:.2f}`)
 * lazy generators (`range`, `map`) and iterator protocol
 * remote registry (HTTP) for `pyhp pkg add`, lockfiles

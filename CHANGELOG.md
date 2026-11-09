@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.3.0 — C++ muscles become real, stdlib for AI / security / IoT
+
+**Language — C++ is now part of PyHP**
+- **`cpp { ... }` native blocks**: embed C++17 directly in a `.pyh` file.
+  Functions declared with a `// pyhp-export:` directive (C ABI: `int64_t`,
+  `double`, `const char*`, `void`) become callable from PyHP. The block is
+  compiled lazily with g++/clang++ (cached in `./.pyhp_native/`), and the
+  bridge picks its mode automatically: PHP ext/ffi when available, otherwise a
+  portable helper-binary protocol that needs only a C++ compiler.
+- **Native C++ backend**: `pyhp build app.pyh --target cpp -o app.cpp` emits a
+  single self-contained C++17 file implementing the PyHP value model;
+  `--target native -o app` also compiles it with g++. Embedded `cpp` blocks are
+  pasted straight into the binary — PyHP + C++ in, machine code out.
+  Supported: the full value model, operators, strings/lists/dicts with all
+  methods, slicing, f-strings, comprehensions, top-level functions
+  (recursion/defaults/variadics), foreach/while/do/for, try/catch/throw,
+  `require()` of modules and stdlib, `cpp` blocks, SHA-256, JSON and
+  base64/url builtins. Classes/lambdas/`finally` are not there yet (clear
+  compile errors point at the PHP engines).
+- `pyhp build --target php|cpp|native` flag; `pyhp_build` unchanged by default.
+
+**Stdlib (`lib/`, loads with `require("ai")` etc. — no install step)**
+- `ai` — machine learning: `linear_fit`/`linear_predict` (gradient descent),
+  `kmeans`/`nearest_centroid`, `dot/euclid/manhattan/cosine`, `matmul`/
+  `transpose`, `mean/variance/stdev/median`, `minmax`/`standardize`,
+  `train_test_split`, `rng_next`/`rand_list` (seeded 32-bit LCGs that fit
+  exactly in 64-bit math on every engine), `sigmoid`/`relu`,
+  `accuracy/mse/mae/r2`.
+- `sec` — security research (CTF/authorized labs): `caesar/rot13/vigenere/
+  xor_cipher`, `crack_caesar` (chi-square English scoring), `entropy`,
+  `char_freq`, `hexdump`, `log2` (pure-PyHP, engine-exact), `ip_to_int/
+  int_to_ip/subnet/host_range`, `password_gen`, `hash_file`.
+- `iot` — sensors and telemetry: `sensor_sim`, `moving_avg/ema/deadband/
+  rolling_stats/threshold_flags/clamp/median`, `crc16` (CRC-16/Modbus,
+  matches the 0x4B37 check vector), `telemetry/parse_telemetry/
+  telemetry_batch` (JSON/NDJSON), `mqtt_frame/mqtt_parse/mqtt_publish/
+  mqtt_consume` (frames with CRC trailers).
+
+**Built-ins (53 → 62)**
+- `json_parse` / `json_string` (deterministic output; lists/dicts round-trip).
+- `md5`, `sha256` (also implemented natively in the C++ backend), `crc32`.
+- `base64e` / `base64d` (strict), `urlenc` / `urldec` (RFC 3986).
+
+**Engine parity fixes found by the new cross-engine tests**
+- `pyhp_mod` now uses exact 64-bit integer math for int/int (the old float
+  fallback lost precision on large operands, e.g. `(r * 1103515245 + 12345) %
+  2147483648`).
+- `for`-update parts may now be assignments (`for (i = 0; i < n; i += 2)`),
+  matching what both engines already supported semantically.
+- Native backend matches PHP float formatting (PHP 14-digit precision,
+  minimal exponents like `E-9`), int-division results, and dict/list repr.
+
+**Docs & AI kit**
+- `docs/REFERENCE.md` — 0.3.0: native blocks, C++ backend, stdlib reference.
+- New guides: `docs/guides/AI-DEVELOPMENT.md`,
+  `docs/guides/SECURITY-RESEARCH.md`, `docs/guides/IOT.md`.
+- `ai/pyhp-spec.json`, `ai/llms.txt`, `ai/pyhp-qa.jsonl`, `ai/pyhp-code.jsonl`
+  regenerated from the live engine with the new features (all snippets
+  executed and verified).
+- Tests: 29 → 35 cases (json/crypto, ai, sec, iot parity + two native-backend
+  tests that skip gracefully when g++ is missing).
+
 ## 0.2.0 — modules, packages & AI kit
 
 **Language**
