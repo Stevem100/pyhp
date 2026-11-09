@@ -1,0 +1,5 @@
+# keep Windows batch files CRLF
+*.bat text eol=crlf
+*.md text
+*.php text
+*.pyh text

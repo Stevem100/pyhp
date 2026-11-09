@@ -1,0 +1,62 @@
+// ============================================================
+// PyHP — Lists, dicts, slicing and comprehensions (Python DNA)
+// Run:  php bin/pyhp run examples/02_collections.pyh
+// ============================================================
+
+// lists are dynamic and nest freely
+langs = ["PHP", "Python", "C"];
+langs.append("PyHP");
+print("langs:", langs, "len:", len(langs));
+
+// negative indices and Python-style slicing (start:stop:step)
+xs = [0, 10, 20, 30, 40, 50];
+print("xs[2]:", xs[2], " xs[-1]:", xs[-1]);
+print("xs[1:4]:", xs[1:4], " xs[:3]:", xs[:3], " xs[::2]:", xs[::2]);
+print("reversed:", xs[::-1]);
+
+// lists alias like Python objects
+copy_alias = langs;
+copy_alias.append("(the hybrid)");
+print("aliased:", langs);
+
+// dicts: string or int keys, bracket access
+user = {"name": "Ada", "langs": ["PHP", "Python"], "age": 36};
+user["langs"].append("C");
+print("user:", user);
+print("keys:", user.keys(), " values:", user.values());
+print("has age?", user.has("age"), " get missing:", user.get("email", "n/a"));
+
+// foreach: one variable gives values, two gives key/index + value
+foreach lang in langs { echo lang, " "; }
+print("");
+foreach k, v in user { print(f"  {k} => {v}"); }
+
+// comprehensions — with filter
+squares = [n * n for n in range(1, 8)];
+evens = [n for n in squares if n % 2 == 0];
+print("squares:", squares);
+print("evens:  ", evens);
+
+// dict comprehension over key, value pairs
+prices = {"tea": 3, "coffee": 4, "cocoa": 6};
+doubled = {k: v * 2 for k, v in prices};
+expensive = {k: v for k, v in prices if v >= 4};
+print("doubled:", doubled);
+print("expensive:", expensive);
+
+// rich builtins + higher-order functions with lambdas
+print("sum:", sum(squares), " min:", min(squares), " max:", max(squares));
+print("map:", map(lambda x: x + 1, [1, 2, 3]));
+print("filter:", filter(lambda x: x > 3, squares));
+print("zip:", zip(["a", "b", "c"], [1, 2, 3]));
+print("enumerate:", enumerate(["x", "y"]));
+print("sorted desc:", sorted([5, 2, 9, 1])[::-1]);
+print("any/all:", any([0, "", null, 7]), all([1, "x", true]));
+
+// strings are objects with methods
+s = "  Hybrid Power  ";
+print("upper:", s.strip().upper());
+print("split:", "a,b,c".split(","));
+print("join:", "-".join(["py", "hp"]));
+print("replace/find:", "hello world".replace("world", "PyHP"), "hello PyHP".find("PyHP"));
+print("contains:", "PyHP".contains("HP"), " startswith:", "PyHP".startswith("Py"));

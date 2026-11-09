@@ -1,0 +1,116 @@
+// ============================================================
+// PyHP — Classes, inheritance and exceptions (Python DNA)
+// Run:  php bin/pyhp run examples/03_oop.pyh
+// ============================================================
+
+class Shape {
+    // typed properties with defaults are checked at construction
+    string name = "shape";
+
+    function __construct(string name) {
+        this.name = name;
+    }
+
+    function area() {
+        return 0.0;
+    }
+
+    function describe() {
+        return f"{this.name} has area {this.area()}";
+    }
+}
+
+class Circle extends Shape {
+    float radius;
+
+    function __construct(float radius) {
+        super.__construct("circle");
+        this.radius = radius;
+    }
+
+    function area() {
+        return 3.14159 * this.radius ** 2;
+    }
+}
+
+class Rect extends Shape {
+    float w;
+    float h;
+
+    function __construct(float w, float h) {
+        super.__construct("rect");
+        this.w = w;
+        this.h = h;
+    }
+
+    function area() {
+        return this.w * this.h;
+    }
+}
+
+shapes = [Circle(2.0), Rect(3.0, 4.0)];
+foreach s in shapes {
+    print(s.describe());
+}
+print("isinstance checks:", isinstance(shapes[0], "Circle"), isinstance(shapes[0], "Shape"));
+print("type of shapes[1]:", type(shapes[1]));
+
+// ---- exceptions: builtin and user-defined --------------------
+
+class InsufficientFunds extends Exception {
+    function __construct(string msg) {
+        super.__construct(msg);
+    }
+}
+
+class BankAccount {
+    float balance = 0.0;
+
+    function deposit(float amount) {
+        if amount <= 0 { throw ValueError("deposit must be positive"); }
+        this.balance += amount;
+        return this.balance;
+    }
+
+    function withdraw(float amount) {
+        if amount > this.balance {
+            throw InsufficientFunds(f"cannot withdraw {amount}, balance is {this.balance}");
+        }
+        this.balance -= amount;
+        return this.balance;
+    }
+}
+
+acc = BankAccount();
+acc.deposit(100.0);
+print("balance after deposit:", acc.balance);
+
+try {
+    acc.withdraw(500.0);
+} catch (InsufficientFunds e) {
+    print("error:", e.message);
+} catch (Exception e) {
+    print("generic error:", e.message);
+} finally {
+    print("done with withdrawals");
+}
+
+// a bare builtin error can be thrown and caught too
+try {
+    xs = [1, 2, 3];
+    print(xs[99]);
+} catch (IndexError e) {
+    print("caught:", e.message);
+}
+
+// __str__ customizes printing
+class Point {
+    int x = 0;
+    int y = 0;
+    function __construct(int px, int py) {
+        this.x = px;
+        this.y = py;
+    }
+    function __str__() { return f"Point({this.x}, {this.y})"; }
+}
+print(Point(3, 4));

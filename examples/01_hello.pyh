@@ -1,0 +1,43 @@
+// ============================================================
+// PyHP — Hello World & the basics
+// Run:  php bin/pyhp run examples/01_hello.pyh
+// ============================================================
+
+name = "PyHP";
+year = 2026;
+pi = 3.14159;
+happy = true;
+
+echo "Hello from ", name, "!", "\n";
+print("A hybrid of PHP syntax, Python brains and C muscles.");
+
+// f-strings interpolate any expression between { }
+print(f"{name} was born in {year}; pi/2 is {pi / 2}.");
+
+// ternary operator (PHP/C style) and word operators (Python style)
+status = year >= 2026 ? "current" : "old";
+print(f"status: {status}, and: {happy and status == "current"}");
+
+// PHP-style echo with multiple arguments; Python-style print()
+echo "echo joins directly | ";
+echo "no newline is added\n";
+
+// arithmetic playground: ** for powers, // is a comment, / is true division
+print(f"2 ** 10 = {2 ** 10}, 7 / 2 = {7 / 2}, 7 % 3 = {7 % 3}");
+
+// while loop with a classic accumulator
+countdown = 3;
+while countdown > 0 {
+    echo countdown, "... ";
+    countdown--;
+}
+echo "lift-off!\n";
+
+// truthiness works like Python: 0, "", [], {} and null are falsy
+if not year % 2 {
+    print("even year");
+} elseif year == 2026 {
+    print("welcome to 2026");
+} else {
+    print("some other year");
+}

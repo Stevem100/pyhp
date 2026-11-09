@@ -1,0 +1,9 @@
+# transpiler outputs
+out.php
+hello.php
+*.compiled.php
+
+# OS cruft
+Thumbs.db
+Desktop.ini
+.DS_Store

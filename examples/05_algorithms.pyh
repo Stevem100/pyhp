@@ -1,0 +1,102 @@
+// ============================================================
+// PyHP — Algorithms: fizzbuzz, quicksort, sieve, closures
+// Run:  php bin/pyhp run examples/05_algorithms.pyh
+// ============================================================
+
+// ---- FizzBuzz, the classic ------------------------------------
+fizzbuzz = [];
+for (int i = 1; i <= 15; i++) {
+    if i % 15 == 0      { fizzbuzz.append("FizzBuzz"); }
+    elseif i % 3 == 0   { fizzbuzz.append("Fizz"); }
+    elseif i % 5 == 0   { fizzbuzz.append("Buzz"); }
+    else                { fizzbuzz.append(str(i)); }
+}
+echo "fizzbuzz: ", " ".join(fizzbuzz), "\n";
+
+// ---- Quicksort (recursive, pure) -------------------------------
+function quicksort(list xs) -> list {
+    if len(xs) <= 1 { return xs; }
+    pivot = xs[0];
+    rest = xs[1:];
+    smaller = [x for x in rest if x < pivot];
+    larger  = [x for x in rest if x >= pivot];
+    return quicksort(smaller) + [pivot] + quicksort(larger);
+}
+print("quicksort:", quicksort([9, 4, 7, 1, 8, 2, 6]));
+
+// ---- Sieve of Eratosthenes -------------------------------------
+function primes(int n) -> list {
+    sieve = {};
+    foreach i in range(2, n + 1) { sieve[i] = true; }
+    p = 2;
+    while p * p <= n {
+        if sieve.has(p) {
+            m = p * p;
+            while m <= n {
+                if sieve.has(m) { sieve.remove(m); }
+                m += p;
+            }
+        }
+        p++;
+    }
+    return sieve.keys();
+}
+print("primes < 40:", primes(40));
+
+// ---- Closures: a counter factory (state lives in the closure) --
+function make_counter(string label) {
+    n = 0;
+    tick = function() {
+        n += 1;
+        return f"{label}#{n}";
+    };
+    return tick;
+}
+
+a = make_counter("A");
+b = make_counter("B");
+print(a(), a(), a(), b(), b());
+
+// ---- Word frequency with dict methods --------------------------
+text = "the quick brown fox jumps over the lazy dog the end";
+freq = {};
+foreach word in text.split(" ") {
+    freq[word] = freq.get(word, 0) + 1;
+}
+top = sorted(freq.keys());
+print("distinct words:", len(freq));
+foreach w in top { echo f"{w}:{freq[w]} "; }
+print("");
+
+// ---- Matrix multiplication (nested lists) ----------------------
+function matmul(list a, list b) -> list {
+    n = len(a);
+    m = len(b[0]);
+    result = [];
+    foreach i in range(n) {
+        row = [];
+        foreach j in range(m) {
+            s = 0;
+            foreach k in range(len(b)) {
+                s += a[i][k] * b[k][j];
+            }
+            row.append(s);
+        }
+        result.append(row);
+    }
+    return result;
+}
+A = [[1, 2], [3, 4]];
+B = [[5, 6], [7, 8]];
+print("matmul:", matmul(A, B));
+
+// ---- Collatz sequence -------------------------------------------
+function collatz(int n) -> list {
+    seq = [n];
+    while n != 1 {
+        n = n % 2 == 0 ? n / 2 : 3 * n + 1;
+        seq.append(int(n));
+    }
+    return seq;
+}
+print("collatz(27) length:", len(collatz(27)), "head:", collatz(27)[:8]);

@@ -1,0 +1,254 @@
+#!/usr/bin/env php
+<?php
+/**
+ * PyHP 0.1.0 — CLI runner + REPL + transpiler driver.
+ *
+ * Usage:
+ *   php bin/pyhp run     <script.pyh> [args...]   run with the tree-walking interpreter
+ *   php bin/pyhp build   <script.pyh> -o out.php  transpile to standalone PHP
+ *   php bin/pyhp compile <script.pyh> [args...]   transpile + execute (fast path)
+ *   php bin/pyhp repl                             interactive shell
+ *   php bin/pyhp version | help
+ */
+
+require_once __DIR__ . '/../src/runtime.php';
+require_once __DIR__ . '/../src/Lexer.php';
+require_once __DIR__ . '/../src/Parser.php';
+require_once __DIR__ . '/../src/Interpreter.php';
+require_once __DIR__ . '/../src/Transpiler.php';
+
+const PYHP_CLI = true;
+
+function pyhp_usage(): void {
+    $v = PYHP_VERSION;
+    echo <<<TXT
+PyHP {$v} — PHP syntax, Python brains, C muscles.
+
+  pyhp run <script.pyh> [args...]      run via the built-in interpreter
+  pyhp build <script.pyh> -o out.php   transpile to a standalone PHP file
+  pyhp compile <script.pyh> [args...]  transpile + run (fast path)
+  pyhp repl                            start the interactive shell
+
+Examples:
+  php bin/pyhp run examples/01_hello.pyh
+  php bin/pyhp build examples/01_hello.pyh -o /tmp/hello.php && php /tmp/hello.php
+  php bin/pyhp repl
+
+TXT;
+}
+
+function pyhp_fail(Throwable $e): int {
+    $msg = $e->getMessage();
+    if ($e instanceof PyHPError) {
+        fwrite(STDERR, "PyHP " . $e->pyhpType . ": " . $msg . "\n");
+    } elseif ($e instanceof PyHPSyntaxError) {
+        fwrite(STDERR, "PyHP SyntaxError: " . $msg . "\n");
+    } else {
+        fwrite(STDERR, "PyHP internal error: " . get_class($e) . ": " . $msg . "\n");
+    }
+    return 1;
+}
+
+/* ----------------------------------------------------------------- */
+/* script execution (interpreter)                                    */
+/* ----------------------------------------------------------------- */
+
+function pyhp_run_file(string $path, array $scriptArgs): int {
+    if (!is_file($path)) {
+        fwrite(STDERR, "PyHP: cannot find script '{$path}'\n");
+        return 1;
+    }
+    $src = file_get_contents($path);
+    pyhp_set_argv($scriptArgs);
+    try {
+        $stmts = PyHPParser::parseSource($src);
+        $interp = new PyHPInterpreter();
+        $interp->runProgram($stmts);
+        return 0;
+    } catch (PyHPExit $e) {
+        return $e->exitCode;
+    } catch (PyHPThrow $t) {
+        $inst = $t->value;
+        fwrite(STDERR, "PyHP uncaught exception " . pyhp_type_name($inst) . ": " . pyhp_tostr($inst) . "\n");
+        return 1;
+    } catch (PyHPError $e) {
+        return pyhp_fail($e);
+    }
+}
+
+/* ----------------------------------------------------------------- */
+/* transpile + compile-run                                           */
+/* ----------------------------------------------------------------- */
+
+function pyhp_build_file(string $path, string $out): int {
+    if (!is_file($path)) {
+        fwrite(STDERR, "PyHP: cannot find script '{$path}'\n");
+        return 1;
+    }
+    try {
+        $stmts = PyHPParser::parseSource(file_get_contents($path));
+        $php = (new PyHPTranspiler())->transpile($stmts, $out);
+        file_put_contents($out, $php);
+        echo "compiled {$path} -> {$out}\n";
+        return 0;
+    } catch (PyHPError $e) {
+        return pyhp_fail($e);
+    }
+}
+
+function pyhp_compile_run(string $path, array $scriptArgs): int {
+    $tmp = tempnam(sys_get_temp_dir(), 'pyhp_compiled_') . '.php';
+    try {
+        $stmts = PyHPParser::parseSource(file_get_contents($path));
+        $php = (new PyHPTranspiler())->transpile($stmts, $tmp);
+        file_put_contents($tmp, $php);
+    } catch (PyHPError $e) {
+        @unlink($tmp);
+        return pyhp_fail($e);
+    }
+    // hand argv to the generated file, then run it in this process
+    pyhp_set_argv($scriptArgs);
+    try {
+        require $tmp;
+        $code = 0;
+    } catch (PyHPError $e) {
+        $code = pyhp_fail($e);
+    } catch (PyHPThrow $t) {
+        $inst = $t->value;
+        fwrite(STDERR, "PyHP uncaught exception " . pyhp_type_name($inst) . ": " . pyhp_tostr($inst) . "\n");
+        $code = 1;
+    }
+    @unlink($tmp);
+    return $code;
+}
+
+/* ----------------------------------------------------------------- */
+/* REPL                                                              */
+/* ----------------------------------------------------------------- */
+
+function pyhp_repl(): int {
+    echo "PyHP " . PYHP_VERSION . " interactive shell — PHP syntax, Python brains, C muscles.\n";
+    echo "Type :help for commands, :quit (or Ctrl-D) to exit.\n\n";
+    $interp = new PyHPInterpreter();
+    $buffer = '';
+    while (true) {
+        $prompt = $buffer === '' ? 'pyhp> ' : '....> ';
+        if (function_exists('readline')) {
+            $line = readline($prompt);
+        } else {
+            echo $prompt;
+            $line = fgets(STDIN);
+            if ($line !== false) $line = rtrim($line, "\r\n");
+        }
+        if ($line === false || $line === null) { echo "\n"; break; } // Ctrl-D
+        if (function_exists('readline_add_history')) { readline_add_history($line); }
+        $trimmed = trim($line);
+        if ($buffer === '' && str_starts_with($trimmed, ':')) {
+            $cmd = strtolower($trimmed);
+            if ($cmd === ':quit' || $cmd === ':exit' || $cmd === ':q') break;
+            if ($cmd === ':help') {
+                echo "  :help   show this help\n  :vars   dump all global variables\n  :quit   exit the shell\n";
+                echo "Tip: statements need semicolons; a bare expression prints its value.\n";
+                continue;
+            }
+            if ($cmd === ':vars') {
+                foreach ($interp->global->vars as $k => $v) {
+                    if (in_array($k, array_keys(pyhp_builtins()), true)) continue;
+                    echo "  {$k} = " . pyhp_repr($v) . "\n";
+                }
+                continue;
+            }
+            echo "unknown command: {$trimmed}\n";
+            continue;
+        }
+        $buffer .= $line . "\n";
+        if (!pyhp_balanced($buffer)) continue;
+
+        $src = $buffer;
+        $buffer = '';
+        // allow bare expressions without a trailing semicolon (REPL nicety)
+        $rt = rtrim($src);
+        if ($rt !== '' && !str_ends_with($rt, ';') && !str_ends_with($rt, '}')) {
+            $src = $rt . ';';
+        }
+        try {
+            $stmts = PyHPParser::parseSource($src);
+            $value = $interp->runProgram($stmts);
+            if ($value !== null && count($stmts) === 1 && $stmts[0]['k'] === 'Expr'
+                && !in_array($stmts[0]['e']['k'], ['Assign', 'Post'], true)) {
+                echo "=> " . pyhp_repr($value) . "\n";
+            }
+        } catch (PyHPError $e) {
+            echo "Error: " . $e->pyhpType . ": " . $e->message . "\n";
+        } catch (PyHPThrow $t) {
+            echo "Uncaught exception: " . pyhp_tostr($t->value) . "\n";
+        } catch (PyHPExit $e) {
+            break;
+        }
+    }
+    return 0;
+}
+
+function pyhp_balanced(string $s): bool {
+    $depth = 0;
+    $inStr = null;
+    $n = strlen($s);
+    for ($i = 0; $i < $n; $i++) {
+        $c = $s[$i];
+        if ($inStr !== null) {
+            if ($c === '\\') { $i++; continue; }
+            if ($c === $inStr) $inStr = null;
+            continue;
+        }
+        if ($c === '"' || $c === "'") { $inStr = $c; continue; }
+        if ($c === '/' && $i + 1 < $n && $s[$i + 1] === '/') { // line comment
+            while ($i < $n && $s[$i] !== "\n") $i++;
+            continue;
+        }
+        if ($c === '#') { while ($i < $n && $s[$i] !== "\n") $i++; continue; }
+        if ($c === '{' || $c === '(' || $c === '[') $depth++;
+        if ($c === '}' || $c === ')' || $c === ']') $depth--;
+    }
+    return $depth <= 0;
+}
+
+/* ----------------------------------------------------------------- */
+/* main                                                              */
+/* ----------------------------------------------------------------- */
+
+$cmd = $argv[1] ?? null;
+if ($cmd === null || $cmd === 'help' || $cmd === '--help' || $cmd === '-h') {
+    pyhp_usage();
+    exit(0);
+}
+if ($cmd === 'version' || $cmd === '--version') {
+    echo "PyHP " . PYHP_VERSION . "\n";
+    exit(0);
+}
+if ($cmd === 'repl') {
+    exit(pyhp_repl());
+}
+if ($cmd === 'run') {
+    if (!isset($argv[2])) { fwrite(STDERR, "usage: pyhp run <script.pyh> [args...]\n"); exit(1); }
+    exit(pyhp_run_file($argv[2], array_slice($argv, 3)));
+}
+if ($cmd === 'build') {
+    $file = null; $out = null;
+    $rest = array_slice($argv, 2);
+    for ($i = 0; $i < count($rest); $i++) {
+        if ($rest[$i] === '-o' && isset($rest[$i + 1])) { $out = $rest[$i + 1]; $i++; }
+        else { $file = $rest[$i]; }
+    }
+    if ($file === null || $out === null) {
+        fwrite(STDERR, "usage: pyhp build <script.pyh> -o <out.php>\n");
+        exit(1);
+    }
+    exit(pyhp_build_file($file, $out));
+}
+if ($cmd === 'compile') {
+    if (!isset($argv[2])) { fwrite(STDERR, "usage: pyhp compile <script.pyh> [args...]\n"); exit(1); }
+    exit(pyhp_compile_run($argv[2], array_slice($argv, 3)));
+}
+fwrite(STDERR, "unknown command '{$cmd}'\n\n");
+pyhp_usage();
+exit(1);

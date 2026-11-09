@@ -1,0 +1,84 @@
+// ============================================================
+// PyHP — The C DNA: bitwise ops, static typing, memory arena,
+//        files and shell access
+// Run:  php bin/pyhp run examples/04_c_dna.pyh
+// ============================================================
+
+// ---- hex / binary literals and bitwise operators --------------
+flags = 0xF0;
+mask  = 0x0F;
+print(f"0xF0 & 0x0F = {0xF0 & 0x0F}  (masked)");
+print(f"0xF0 | 0x0F = {0xF0 | 0x0F}  (combined)");
+print(f"0xFF ^ 0xAA = {0xFF ^ 0xAA}  (xor)");
+print(f"~0 = {~0}, 1 << 10 = {1 << 10}, 1024 >> 3 = {1024 >> 3}");
+print(f"hex(48879) = {hex(48879)}, bin(5) = {bin(5)}");
+print(f"ord('A') = {ord('A')}, chr(98) = {chr(98)}");
+
+// bit twiddling: check / set / clear / toggle bit 3
+bits = 0b1010;
+print("bit3 set?", (bits & (1 << 3)) != 0);
+bits |= (1 << 3);   // set
+bits &= ~(1 << 1);  // clear
+print("after set bit3, clear bit1:", bin(bits));
+
+// ---- static typing (enforced at runtime) ----------------------
+int count = 0;
+float ratio = 2.5;
+string who = "C";
+bool on = true;
+list xs = [1, 2];
+dict ages = {"ada": 36};
+
+count += 41;
+print(f"typed: count={count} ratio={ratio} who={who} on={on}");
+
+function clamp(int v, int lo, int hi) -> int {
+    if v < lo { return lo; }
+    if v > hi { return hi; }
+    return v;
+}
+print("clamp(150, 0, 100) =", clamp(150, 0, 100));
+
+try {
+    int broken = 1;
+    broken = "not a number";   // TypeError!
+} catch (TypeError e) {
+    print("typing works:", e.message);
+}
+
+// ---- the memory arena: malloc/free with safety rails ---------
+arena = malloc_arena();
+header = arena.alloc(4);
+body   = arena.alloc(16);
+
+header[0] = 0x50; header[1] = 0x59; header[2] = 0x48; header[3] = 0x50;  // "PYHP"
+body.write("hello, arena!", 0);
+print("header bytes:", header[0], header[1], header[2], header[3]);
+print("body string:", body.to_string(), " arena.used():", arena.used());
+
+try {
+    body[100] = 1;            // out of bounds -> MemError
+} catch (MemError e) {
+    print("bounds check:", e.message);
+}
+
+arena.free();                  // deterministic release
+try {
+    body[0];                   // use after free -> MemError
+} catch (MemError e) {
+    print("after free:", e.message);
+}
+
+// ---- files ----------------------------------------------------
+file_write("/tmp/pyhp_demo.txt", "line1: PyHP file API\n");
+file_append("/tmp/pyhp_demo.txt", "line2: written from PyHP\n");
+content = file_read("/tmp/pyhp_demo.txt");
+print("file lines:", content.strip().split("\n"));
+print("file exists?", file_exists("/tmp/pyhp_demo.txt"));
+file_delete("/tmp/pyhp_demo.txt");
+print("after delete?", file_exists("/tmp/pyhp_demo.txt"));
+
+// ---- shell access ---------------------------------------------
+res = exec("echo PyHP shell escape works");
+print(f"exec stdout: {res["stdout"]} exit code: {res["code"]}");
+print("argv passed to the script:", argv());
