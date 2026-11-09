@@ -76,10 +76,10 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile(
               (Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
             if ($errs.Count -gt 0) {
-              $errs | ForEach-Object { Write-Host "$f:$($_.Extent.StartLineNumber): $($_.Message)" }
+              $errs | ForEach-Object { Write-Host ("{0}:{1}: {2}" -f $f, $_.Extent.StartLineNumber, $_.Message) }
               throw "PowerShell syntax errors in $f"
             }
-            Write-Host "$f: syntax OK"
+            Write-Host ("{0}: syntax OK" -f $f)
           }
 
       - name: Install to a custom dir (C:\phpl default needs no elevation here, but keep CI hermetic)
