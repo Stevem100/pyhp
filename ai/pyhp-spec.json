@@ -212,6 +212,10 @@
         ],
         "vendorDir": "vendor/"
     },
+    "install": {
+        "macosLinux": "curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.sh | bash (or ./install.sh --local <folder> from an unzipped release / git clone)",
+        "windows": "irm https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 | iex (or install.bat next to the unzipped release)"
+    },
     "selfUpdate": {
         "version": "pyhp version [--check] — local info; --check queries GitHub for the latest release",
         "update": "pyhp update [--force] [--main] — download the latest GitHub release zip and copy it over the install dir, preserving bundled php/ and vendor/; git clones update via git pull --ff-only",

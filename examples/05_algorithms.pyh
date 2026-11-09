@@ -1,6 +1,6 @@
 // ============================================================
 // PyHP — Algorithms: fizzbuzz, quicksort, sieve, closures
-// Run:  php bin/pyhp run examples/05_algorithms.pyh
+// Run:  pyhp run examples/05_algorithms.pyh
 // ============================================================
 
 // ---- FizzBuzz, the classic ------------------------------------

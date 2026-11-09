@@ -160,7 +160,9 @@ class PyHPTranspiler
         $runtime = realpath(__DIR__ . '/runtime.php');
         $dir = realpath(dirname($this->outFile) ?: '.');
         if ($runtime !== false && $dir !== false && str_starts_with($runtime, $dir . '/')) {
-            return '__DIR__ . ' . var_export(substr($runtime, strlen($dir) + 1), true);
+            // output dir is an ancestor of the PyHP install: emit a __DIR__-relative
+            // require, but keep the '/' separator (__DIR__ alone has no trailing slash)
+            return '__DIR__ . ' . var_export('/' . substr($runtime, strlen($dir) + 1), true);
         }
         return var_export($runtime ?: __DIR__ . '/runtime.php', true);
     }

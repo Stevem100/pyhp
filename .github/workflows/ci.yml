@@ -1,8 +1,10 @@
 name: CI
 
-# Runs the full PyHP test suite after every commit (push) and every PR.
-# The two native-backend tests compile with g++ when it is available and
-# skip gracefully otherwise, so this works on every runner.
+# Runs the full PyHP test suite after every commit (push) and every PR,
+# on Ubuntu, Windows and macOS with PHP 8.2 and 8.3. The two native-backend
+# tests compile with g++ when it is available and skip gracefully otherwise.
+# A separate job proves the macOS/Linux `install.sh` + `uninstall.sh` round
+# trip on a clean HOME, so the bare `pyhp` command stays first-class on Unix.
 
 on:
   push:
@@ -15,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
         php: ['8.2', '8.3']
     steps:
       - uses: actions/checkout@v4
@@ -28,3 +30,28 @@ jobs:
 
       - name: Run test suite (interpreter + transpiler + native backend)
         run: php tests/run_tests.php
+
+  install-sh:
+    name: install.sh / uninstall.sh smoke (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install from the local checkout into a clean HOME
+        run: |
+          ./install.sh --local . --no-path
+          export PATH="$HOME/.local/bin:$PATH"
+          pyhp version
+          pyhp run examples/01_hello.pyh
+          pyhp build examples/01_hello.pyh -o hello.php
+          php hello.php | head -n 2
+
+      - name: Install dir stays on the release channel (no .git copied)
+        run: test ! -e "$HOME/.local/share/pyhp/.git"
+
+      - name: Uninstall cleanly
+        run: |
+          ./uninstall.sh
+          test ! -e "$HOME/.local/share/pyhp"
+          test ! -e "$HOME/.local/bin/pyhp"
+          echo "uninstall OK"

@@ -3,15 +3,15 @@
 /**
  * PyHP — CLI runner + REPL + transpiler driver + self-updater.
  *
- * Usage:
- *   php bin/pyhp run     <script.pyh> [args...]   run with the tree-walking interpreter
- *   php bin/pyhp build   <script.pyh> -o out.php  transpile to standalone PHP
- *   php bin/pyhp compile <script.pyh> [args...]   transpile + execute (fast path)
- *   php bin/pyhp repl                             interactive shell
- *   php bin/pyhp version [--check]                version info (+ latest on GitHub)
- *   php bin/pyhp update [--force] [--main]        self-update from GitHub
- *   php bin/pyhp pkg init|add|remove|list         package manager
- *   php bin/pyhp help
+ * Usage (see install.sh / install.ps1 for the one-line `pyhp` setup):
+ *   pyhp run     <script.pyh> [args...]   run with the tree-walking interpreter
+ *   pyhp build   <script.pyh> -o out.php  transpile to standalone PHP
+ *   pyhp compile <script.pyh> [args...]   transpile + execute (fast path)
+ *   pyhp repl                             interactive shell
+ *   pyhp version [--check]                version info (+ latest on GitHub)
+ *   pyhp update [--force] [--main]        self-update from GitHub
+ *   pyhp pkg init|add|remove|list         package manager
+ *   pyhp help
  */
 
 require_once __DIR__ . '/../src/runtime.php';
@@ -38,12 +38,12 @@ PyHP {$v} — PHP syntax, Python brains, C muscles.
   pyhp update [--force] [--main]       update PyHP from GitHub releases
 
 Examples:
-  php bin/pyhp run examples/01_hello.pyh
-  php bin/pyhp build examples/01_hello.pyh -o /tmp/hello.php && php /tmp/hello.php
-  php bin/pyhp pkg add mathx
-  php bin/pyhp version --check
-  php bin/pyhp update
-  php bin/pyhp repl
+  pyhp run examples/01_hello.pyh
+  pyhp build examples/01_hello.pyh -o /tmp/hello.php && php /tmp/hello.php
+  pyhp pkg add mathx
+  pyhp version --check
+  pyhp update
+  pyhp repl
 
 TXT;
 }

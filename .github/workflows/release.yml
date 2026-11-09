@@ -46,7 +46,12 @@ jobs:
             ```
             or unzip this asset, double-click `install.bat`, and keep the folder anywhere you like.
 
-            **macOS / Linux:** unzip, then `alias pyhp='php /path/to/pyhp/bin/pyhp'`.
+            **macOS / Linux (recommended):** run the one-line installer in a terminal
+            ```
+            curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.sh | bash
+            ```
+            or unzip this asset and run `./install.sh --local <unzipped-folder>` — it puts a
+            `pyhp` launcher on your PATH so every command is plain `pyhp run` / `pyhp build`.
 
             **Already installed?** Update in place:
             ```

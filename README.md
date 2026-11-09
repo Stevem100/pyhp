@@ -1,4 +1,4 @@
-# PyHP 0.4.0
+# PyHP 0.4.1
 
 [![CI](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml/badge.svg)](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml)
 
@@ -21,7 +21,10 @@ PyHP ships with **three execution paths** built from the same front-end:
 
 All paths share the exact same data model, so the 35-case test suite passes every program through the engines and asserts byte-identical output.
 
-New in 0.4.0: **`pyhp update` / `pyhp version`** — the CLI manages itself now (self-update
+New in 0.4.1: **`pyhp` everywhere** — a one-line **macOS / Linux installer**
+(`install.sh`) that puts a `pyhp` launcher on your PATH, so every documented
+command is now plain `pyhp run` / `pyhp build` on all three OSes. New in
+0.4.0: **`pyhp update` / `pyhp version`** — the CLI manages itself now (self-update
 from GitHub releases, `--check` for the latest version), and the repo ships **CI** that
 runs the full test suite after every commit plus an automated **release pipeline** that
 packages a zip for every `v*` tag. New in 0.3.0: **C++ native blocks + a native C++
@@ -45,46 +48,60 @@ Requirements: PHP 8.0+ (CLI). No extensions needed.
 > adds `pyhp` to your PATH, and runs a smoke test. Full details, parameters and
 > a manual route: [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md).
 
+> **macOS / Linux?** One line in a terminal — no admin rights:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.sh | bash
+> ```
+>
+> The installer reuses any PHP 8 you have (and tells you how to get it if you
+> don't), installs PyHP to `~/.local/share/pyhp`, drops a `pyhp` launcher into
+> `~/.local/bin`, and runs a smoke test. From an unzipped release or a clone:
+> `./install.sh --local .` — uninstall any time with `./uninstall.sh`.
+
 ```bash
 # run with the built-in interpreter
-php bin/pyhp run examples/01_hello.pyh
+pyhp run examples/01_hello.pyh
 
 # run with the transpiled fast path
-php bin/pyhp compile examples/01_hello.pyh
+pyhp compile examples/01_hello.pyh
 
 # transpile to a standalone PHP file you can deploy anywhere
-php bin/pyhp build examples/01_hello.pyh -o hello.php
+pyhp build examples/01_hello.pyh -o hello.php
 php hello.php extra cli args   # -> available as argv()
 
 # interactive shell
-php bin/pyhp repl
+pyhp repl
 
 # run the test suite (35 cases across all engines)
 php tests/run_tests.php
 
 # packages: install from the bundled registry, then require()
-php bin/pyhp pkg add mathx
-php bin/pyhp run examples/pkg-demo/main.pyh
+pyhp pkg add mathx
+pyhp run examples/pkg-demo/main.pyh
 
 # C++ inside PyHP, then everything compiled to a native binary
-php bin/pyhp run examples/07_native_cpp.pyh
-php bin/pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_demo
+pyhp run examples/07_native_cpp.pyh
+pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_demo
 /tmp/pyhp_demo
 
 # domain toolkits ship with the language — no install step
-php bin/pyhp run examples/08_ai_ml.pyh        # machine learning
-php bin/pyhp run examples/09_security.pyh     # security research toolkit
-php bin/pyhp run examples/10_iot.pyh          # IoT telemetry & framing
+pyhp run examples/08_ai_ml.pyh        # machine learning
+pyhp run examples/09_security.pyh     # security research toolkit
+pyhp run examples/10_iot.pyh          # IoT telemetry & framing
 
 # the CLI manages itself
-php bin/pyhp version --check                  # local version + latest on GitHub
-php bin/pyhp update                           # self-update in place (keeps php/ and vendor/)
+pyhp version --check                  # local version + latest on GitHub
+pyhp update                           # self-update in place (keeps php/ and vendor/)
 ```
+
+(Working from a repo checkout instead of an install? `./bin/pyhp` carries a
+`#!/usr/bin/env php` shebang, so `./bin/pyhp run ...` works too.)
 
 ### REPL in 60 seconds
 
 ```
-$ php bin/pyhp repl
+$ pyhp repl
 pyhp> x = 5
 pyhp> x * 2
 => 10
@@ -267,7 +284,10 @@ Both engines enforce argument arity and type errors themselves (no reliance on P
 ## Architecture
 
 ```
+install.sh       one-line installer (macOS/Linux): pyhp launcher on your PATH
+uninstall.sh     removes install dir + launcher + PATH line (install.ps1 on Windows)
 bin/pyhp          CLI: run | build (--target php|cpp|native) | compile | repl | pkg
+                  | version | update
 src/Lexer.php     source -> tokens (f-strings, raw `cpp { ... }` blocks)
 src/Parser.php    tokens -> AST (recursive descent, ~36 node kinds)
 src/Interpreter.php  AST -> PyHPEnv scopes, signals, classes (our own interpreter)

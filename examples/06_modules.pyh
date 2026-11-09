@@ -1,6 +1,6 @@
 // PyHP — modules & packages: require(), vendor/ packages, pyhp pkg
-// Run:  php bin/pyhp run examples/06_modules.pyh
-//       php bin/pyhp compile examples/06_modules.pyh   (same output, fast path)
+// Run:  pyhp run examples/06_modules.pyh
+//       pyhp compile examples/06_modules.pyh   (same output, fast path)
 
 text = require("./06_helper.pyh");
 

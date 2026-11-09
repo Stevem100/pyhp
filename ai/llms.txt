@@ -63,8 +63,9 @@ https://github.com/Stevem100/pyhp
   `pyh_f(1.5)` from PyHP — bridge types int64_t/double/const char*/void;
   compiled lazily with g++, cached in ./.pyhp_native/. Whole-program native
   build: `pyhp build app.pyh --target native -o app` (no PHP at runtime).
-- CLI: `pyhp run|build [--target php|cpp|native]|compile|repl|pkg` (or
-  `php bin/pyhp ...`); script args arrive via `argv()`.
+- CLI: `pyhp run|build [--target php|cpp|native]|compile|repl|pkg|version
+  [--check]|update [--force] [--main]`; installed via one-line `install.sh`
+  (macOS/Linux) or `install.ps1` (Windows); script args arrive via `argv()`.
 
 ## Common pitfalls (verified)
 

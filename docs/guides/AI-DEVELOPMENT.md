@@ -9,7 +9,7 @@ Composer/npm (`pyhp pkg`).
 This guide is written against PyHP 0.3.0. Every snippet was executed on all
 three engines (interpreter, PHP build, native build) with byte-identical
 results. Run the full walkthrough with
-`php bin/pyhp run examples/08_ai_ml.pyh`.
+`pyhp run examples/08_ai_ml.pyh`.
 
 ## 1. The mental model
 
@@ -101,7 +101,7 @@ cpp {
 becomes machine code:
 
 ```
-php bin/pyhp build train.pyh --target native -o train
+pyhp build train.pyh --target native -o train
 ./train
 ```
 
@@ -125,9 +125,9 @@ file_write("predictions.jsonl", out + "\n");   // NDJSON append with file_append
 
 ```c
 mkdir mymodels && cd mymodels
-php bin/pyhp pkg init mymodels       # pyhp.json + src/mymodels.pyh
+pyhp pkg init mymodels       # pyhp.json + src/mymodels.pyh
 # ... implement functions in src/mymodels.pyh ...
-php bin/pyhp pkg add mathx           # declare a dependency from the registry
+pyhp pkg add mathx           # declare a dependency from the registry
 ```
 
 Consumers then do `m = require("mymodels");`. The manifest is `pyhp.json`,

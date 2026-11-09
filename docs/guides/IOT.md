@@ -7,7 +7,7 @@ telemetry, a CRC-16/Modbus implementation verified against the reference
 vector, JSON/NDJSON built in, and `pyhp build --target native` to fuse your
 PyHP plus any embedded C++ into one executable for the device.
 
-Run the full walkthrough with `php bin/pyhp run examples/10_iot.pyh`.
+Run the full walkthrough with `pyhp run examples/10_iot.pyh`.
 
 ## 1. Simulate, then condition, a sensor
 
@@ -104,7 +104,7 @@ while true {
 ```
 
 ```bash
-php bin/pyhp build firmware_logic.pyh --target native -o sensor-agent
+pyhp build firmware_logic.pyh --target native -o sensor-agent
 scp sensor-agent gateway:/usr/local/bin/
 ```
 

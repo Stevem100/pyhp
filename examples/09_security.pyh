@@ -1,6 +1,6 @@
 // PyHP — security research with the `sec` stdlib module.
 // CTF-friendly ciphers, entropy, hexdumps and network math.
-// Run:  php bin/pyhp run examples/09_security.pyh
+// Run:  pyhp run examples/09_security.pyh
 // Use only on systems you are authorized to test.
 
 sec = require("sec");

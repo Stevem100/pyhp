@@ -1,7 +1,7 @@
 // PyHP — IoT with the `iot` stdlib module: sensors, smoothing, checksums,
 // JSON telemetry and MQTT-style publish frames.
-// Run:  php bin/pyhp run examples/10_iot.pyh
-// Deploy natively: php bin/pyhp build examples/10_iot.pyh --target native -o /tmp/iot_demo && /tmp/iot_demo
+// Run:  pyhp run examples/10_iot.pyh
+// Deploy natively: pyhp build examples/10_iot.pyh --target native -o /tmp/iot_demo && /tmp/iot_demo
 
 iot = require("iot");
 

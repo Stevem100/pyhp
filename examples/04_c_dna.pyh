@@ -1,7 +1,7 @@
 // ============================================================
 // PyHP — The C DNA: bitwise ops, static typing, memory arena,
 //        files and shell access
-// Run:  php bin/pyhp run examples/04_c_dna.pyh
+// Run:  pyhp run examples/04_c_dna.pyh
 // ============================================================
 
 // ---- hex / binary literals and bitwise operators --------------

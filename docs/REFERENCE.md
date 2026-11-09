@@ -32,8 +32,10 @@ pyhp pkg list                            show deps + registry availability
 pyhp version | help
 ```
 
-`php bin/pyhp <command>` is the portable form — `pyhp` is a launcher
-(`pyhp.bat` on Windows, `php bin/pyhp` everywhere).
+`pyhp` is the portable form on every OS: `pyhp.bat` on Windows (installed by
+`install.ps1`), `~/.local/bin/pyhp` on macOS/Linux (installed by `install.sh`).
+From a repo checkout, `./bin/pyhp <command>` and `php bin/pyhp <command>` also
+work — `bin/pyhp` carries a `#!/usr/bin/env php` shebang.
 
 Behavior details:
 

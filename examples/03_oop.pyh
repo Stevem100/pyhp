@@ -1,6 +1,6 @@
 // ============================================================
 // PyHP — Classes, inheritance and exceptions (Python DNA)
-// Run:  php bin/pyhp run examples/03_oop.pyh
+// Run:  pyhp run examples/03_oop.pyh
 // ============================================================
 
 class Shape {

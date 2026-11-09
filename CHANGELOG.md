@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.4.1 — `pyhp` everywhere: one-line Unix installer, no more `php bin/pyhp`
+
+**macOS / Linux are first-class now**
+- **`install.sh`** — the Windows one-liner comes to Unix, no admin rights:
+  `curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.sh | bash`.
+  Installs PyHP to `~/.local/share/pyhp`, reuses any PHP 8 (lookup order:
+  `PHP_BIN` → bundled `php/php` from a previous install → `PATH`; per-OS
+  install hints when none is found), drops a `pyhp` launcher into
+  `~/.local/bin`, adds that to your PATH (single marked line in `.zshrc` /
+  `.bashrc` / `.profile`), and runs a smoke test. Downloads the latest GitHub
+  release asset, falls back to the tag archive and then the `main` branch;
+  extracts with `unzip` or `python3 -m zipfile` when `unzip` is missing.
+  Flags: `--dir`, `--bin-dir`, `--local <folder>` (install from an unzipped
+  release or a clone), `--main`, `--no-path`.
+- **`uninstall.sh`** — removes the install folder, the launcher and the
+  marked PATH line (mirrors `uninstall.ps1`).
+- The install dir is kept on the release channel: `.git` is never copied, so
+  `pyhp update` keeps using GitHub releases.
+- `bin/pyhp` already carries a `#!/usr/bin/env php` shebang — from a checkout,
+  `./bin/pyhp run ...` works out of the box.
+
+**Every documented command is now plain `pyhp run` / `pyhp build`**
+- README, REFERENCE, the three domain guides, all ten examples, the CLI help
+  text and the AI kit (`llms.txt`, regenerated `pyhp-qa.jsonl`) dropped the
+  `php bin/pyhp` prefix. `php bin/pyhp` remains valid from a checkout but is
+  no longer the documented form. Running a transpiled output file (`php
+  hello.php`) and dev tools (`php tests/run_tests.php`,
+  `php tools/build_ai_data.php`) still use `php` directly — that is PHP, not
+  PyHP.
+- `ai/pyhp-spec.json` gains an `install` section; the `selfUpdate` block is
+  now emitted by the generator instead of being hand-patched (regeneration
+  stays stable).
+- Release notes for new tags point macOS/Linux users at the one-line
+  installer instead of the old `alias pyhp='php …'` workaround.
+
+**Fixed**
+- **Transpiler: corrupted `require_once` path when the output folder was an
+  ancestor of the PyHP install** (e.g. PyHP installed under `/tmp/...` or
+  `~/x/pyhp/` while building to `/tmp/app.php` / `~/x/app.php`). The
+  `__DIR__`-relative emit dropped the `/` separator, producing
+  `require_once __DIR__ . 'pyhp-home/...'` → `/tmppyhp-home/...` and a fatal
+  "Failed opening required" on first run of the built file. Found by the new
+  installer smoke test; all three emit modes (relative / install-root /
+  absolute) are now verified.
+
+**CI**
+- New `install-sh` job: installs from the local checkout into a clean HOME,
+  runs `pyhp version` / `pyhp run` / `pyhp build`, asserts no `.git` leaked
+  into the install dir, then uninstalls and asserts everything is gone.
+- The test matrix gains macOS (alongside Ubuntu and Windows, PHP 8.2/8.3).
+
 ## 0.4.0 — the CLI manages itself: `pyhp update` & `pyhp version`
 
 **New CLI commands**

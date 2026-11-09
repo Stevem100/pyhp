@@ -1,6 +1,6 @@
 // PyHP — AI development with the `ai` stdlib module.
-// Run:  php bin/pyhp run examples/08_ai_ml.pyh
-// Or fully native: php bin/pyhp build examples/08_ai_ml.pyh --target native -o /tmp/ai_demo && /tmp/ai_demo
+// Run:  pyhp run examples/08_ai_ml.pyh
+// Or fully native: pyhp build examples/08_ai_ml.pyh --target native -o /tmp/ai_demo && /tmp/ai_demo
 
 ai = require("ai");
 

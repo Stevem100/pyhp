@@ -1,6 +1,6 @@
 // ============================================================
 // PyHP — Hello World & the basics
-// Run:  php bin/pyhp run examples/01_hello.pyh
+// Run:  pyhp run examples/01_hello.pyh
 // ============================================================
 
 name = "PyHP";

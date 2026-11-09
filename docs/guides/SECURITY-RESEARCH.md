@@ -11,7 +11,7 @@ test box with no runtime installed.
 explicitly authorized to test. Classical ciphers and toy generators are for
 education; they are not production cryptography.
 
-Run the full walkthrough with `php bin/pyhp run examples/09_security.pyh`.
+Run the full walkthrough with `pyhp run examples/09_security.pyh`.
 
 ## 1. Classical ciphers, forward and backward
 
@@ -101,7 +101,7 @@ echo "sha256 of the file: ", sha256(file_read(argv()[0])), "\n";
 ```
 
 ```bash
-php bin/pyhp build recon-notes.pyh --target native -o recon-notes
+pyhp build recon-notes.pyh --target native -o recon-notes
 ./recon-notes evidence.txt
 ```
 

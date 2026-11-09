@@ -1,7 +1,7 @@
 // PyHP — native C++ blocks: drop real C++ right into a .pyh file.
-// Run:  php bin/pyhp run examples/07_native_cpp.pyh
+// Run:  pyhp run examples/07_native_cpp.pyh
 // Or compile EVERYTHING (PyHP + the C++ below) to one native binary:
-//       php bin/pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_native && /tmp/pyhp_native
+//       pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_native && /tmp/pyhp_native
 //
 // Exported functions are declared with a `// pyhp-export:` line. The bridge
 // supports int64_t, double and const char* — the classic C ABI.

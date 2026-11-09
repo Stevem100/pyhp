@@ -1,6 +1,6 @@
 // ============================================================
 // PyHP — Lists, dicts, slicing and comprehensions (Python DNA)
-// Run:  php bin/pyhp run examples/02_collections.pyh
+// Run:  pyhp run examples/02_collections.pyh
 // ============================================================
 
 // lists are dynamic and nest freely
