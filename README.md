@@ -24,7 +24,7 @@ All paths share the exact same data model, so the 37-case test suite passes ever
 New in 0.5.0: **keyword arguments** — call functions, methods and constructors
 with `name = value` arguments (Python style): `greet(name = "Ada")`,
 `sorted(xs, key = f, reverse = true)`, `super(x, sound = "Woof")` — in the
-interpreter and the transpiler alike. Windows now installs to **`C:\phpl` by
+interpreter and the transpiler alike. Windows now installs to **`C:\pyhp` by
 default** and `pyhp update` keeps that folder current in place. New in
 0.4.1: **`pyhp` everywhere** — a one-line **macOS / Linux installer**
 (`install.sh`) that puts a `pyhp` launcher on your PATH, so every documented
@@ -50,7 +50,7 @@ Requirements: PHP 8.0+ (CLI). No extensions needed.
 > ```
 >
 > The installer sets up PyHP *and* PHP 8.3 (only if you don't already have PHP)
-> into **`C:\phpl`**, adds `pyhp` to your PATH, and runs a smoke test —
+> into **`C:\pyhp`**, adds `pyhp` to your PATH, and runs a smoke test —
 > `pyhp update` then keeps that folder current forever. Full details, parameters and
 > a manual route: [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md).
 

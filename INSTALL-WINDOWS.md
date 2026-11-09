@@ -32,7 +32,7 @@ curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 -o 
 
 ### What the installer does
 
-- Installs PyHP to **`C:\phpl`** (change the location with `-InstallDir`; if
+- Installs PyHP to **`C:\pyhp`** (change the location with `-InstallDir`; if
   Windows denies writing to `C:\` the installer tells you exactly how to fix
   it — run the terminal once as Administrator, or pick a per-user folder).
 - **PHP handling is automatic** — it reuses PHP if you already have it (PATH,
@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 -o 
 `pyhp update` only exists from **0.4.0** on — on older installs it prints
 `unknown command 'update'` and the banner still says `PyHP 0.1.0`. The fix is
 a single step: **re-run the installer above** (it installs the current version
-into `C:\phpl` and adds it to your user PATH). From then on the installed copy
+into `C:\pyhp` and adds it to your user PATH). From then on the installed copy
 updates itself with `pyhp update` — no more reinstalling.
 
 If typing `pyhp` still shows the old banner or `Press any key to continue`, an
@@ -179,7 +179,7 @@ pyhp> :quit
 Add `C:\pyhp` (or wherever you extracted) to your PATH, using the same GUI
 steps as in Option B, step 4. Keep `pyhp.bat` in the same folder as `bin\` —
 the launcher resolves the language files relative to its own location. (The
-installer does this automatically and adds `C:\phpl` for you.)
+installer does this automatically and adds `C:\pyhp` for you.)
 
 New terminals will now accept `pyhp …` from any directory.
 
@@ -211,7 +211,7 @@ byte-identical output on each.
   batch file, not a PowerShell script.
 - **`pyhp update` keeps the install current** — run it inside any installed
   PyHP (from 0.4.0 on) and it refreshes the folder it lives in, preserving a
-  bundled PHP. Install location (e.g. `C:\phpl`) never changes.
+  bundled PHP. Install location (e.g. `C:\pyhp`) never changes.
 - **`php bin\pyhp …` works everywhere** — the launcher is pure convenience;
   every command in README.md also works in the `php bin\pyhp` form.
 
@@ -223,9 +223,9 @@ byte-identical output on each.
 | --- | --- |
 | `'php' is not recognized` | PHP is not on PATH yet — install per Step 1, then **reopen** the terminal. Already have PHP? Use `setx PHP_BIN "C:\path\to\php.exe"`. |
 | `unexpected token 'match'` or similar parse errors from PHP | An old PHP (7.x) is answering first. Run `where php` to see which one; uninstall/deprioritize it or set `PHP_BIN` to the 8.x `php.exe`. |
-| `'pyhp' is not recognized` | `cd C:\phpl` first; in PowerShell use `.\pyhp.bat`; or add the install folder to PATH (Step 4). |
+| `'pyhp' is not recognized` | `cd C:\pyhp` first; in PowerShell use `.\pyhp.bat`; or add the install folder to PATH (Step 4). |
 | `pyhp version` shows an old version (e.g. 0.1.0) | An old install folder is first on PATH. Delete it (or run its `uninstall.bat`), reopen the terminal. |
 | `unknown command 'update'` | Your install predates 0.4.0 — re-run the current `install.ps1` once; `pyhp update` works from then on. |
-| `PyHP: cannot find script '...'` | Give the full path (`pyhp run C:\phpl\examples\01_hello.pyh`) or `cd` into the install folder. Use backslashes or quotes for paths with spaces. |
+| `PyHP: cannot find script '...'` | Give the full path (`pyhp run C:\pyhp\examples\01_hello.pyh`) or `cd` into the install folder. Use backslashes or quotes for paths with spaces. |
 | REPL prompt does not echo while typing | Normal on stock Windows PHP (no readline extension) — your input is still received; press Enter to submit. |
 | Window flashes and closes | You double-clicked `pyhp.bat`. Run it from a terminal instead (Step 3); double-click without arguments now pauses so you can read the usage text. |

@@ -82,7 +82,7 @@ jobs:
             Write-Host ("{0}: syntax OK" -f $f)
           }
 
-      - name: Install to a custom dir (C:\phpl default needs no elevation here, but keep CI hermetic)
+      - name: Install to a custom dir (C:\pyhp default needs no elevation here, but keep CI hermetic)
         shell: pwsh
         run: |
           ./install.ps1 -InstallDir "$env:RUNNER_TEMP\pyhp-inst" -NoPath

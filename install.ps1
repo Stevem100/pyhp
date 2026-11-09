@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   One-command setup, no admin rights required:
-    - installs PyHP to a fixed folder (default: C:\phpl; change with -InstallDir)
+    - installs PyHP to a fixed folder (default: C:\pyhp; change with -InstallDir)
     - reuses any PHP 8 already on the machine (PATH / PHP_BIN / bundled),
       otherwise downloads PHP 8.3 (NTS x64) into <InstallDir>\php
     - adds PyHP to your user PATH (opt out with -NoPath)
@@ -17,23 +17,23 @@
     curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 -o "%TEMP%\pyhp-install.ps1" && powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\pyhp-install.ps1"
 
   Parameters (download the script first, then pass them):
-    -InstallDir C:\pyhp    where to install (default C:\phpl)
+    -InstallDir C:\pyhp    where to install (default C:\pyhp)
     -NoPath                do not modify PATH
     -SkipPhp               never check or download PHP (you manage PHP yourself)
     -PhpZip <url>          use a specific PHP zip instead of the 8.3 latest build
 
   Upgrading an older PyHP (0.1.x-0.3.x)? Just re-run this installer - it
-  installs the new version into C:\phpl, and from then on `pyhp update` keeps
+  installs the new version into C:\pyhp, and from then on `pyhp update` keeps
   that folder current forever. If an old install folder is still winning the
   PATH race, run the uninstall.ps1 from THAT folder (or just delete the old
   folder) and reopen your terminal.
 
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir C:\phpl
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir C:\pyhp
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = 'C:\phpl',
+    [string]$InstallDir = 'C:\pyhp',
     [switch]$NoPath,
     [switch]$SkipPhp,
     [string]$PhpZip = ''

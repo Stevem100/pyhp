@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 — keyword arguments, Windows installs to `C:\phpl`
+## 0.5.0 — keyword arguments, Windows installs to `C:\pyhp`
 
 **Keyword arguments (Python style)**
 - Pass `name = value` arguments in any call: functions
@@ -24,13 +24,13 @@
   route kwargs correctly — first-class use (`map(len, xs)`, `g = sorted`)
   is unchanged.
 
-**Windows installs to `C:\phpl`**
-- `install.ps1` now defaults to **`C:\phpl`** (was `%LOCALAPPDATA%\Programs\PyHP`)
+**Windows installs to `C:\pyhp`**
+- `install.ps1` now defaults to **`C:\pyhp`** (was `%LOCALAPPDATA%\Programs\PyHP`)
   — matches the usual PHP-folder habit, short and PATH-friendly. `-InstallDir`
   still overrides; if the folder cannot be written (restrictive ACL on `C:\`),
   the installer prints three concrete fixes instead of a cryptic error.
 - `pyhp update` updates the folder the running install lives in — for the new
-  default that means `C:\phpl` in place, preserving a bundled `php\` and any
+  default that means `C:\pyhp` in place, preserving a bundled `php\` and any
   `vendor\` packages. `uninstall.ps1` knows the new default too.
 - `pyhp.bat` falls back to the bundled or PATH copy of PHP when `PHP_BIN` is
   set but unusable (for example a bare `php` left in the environment by other
