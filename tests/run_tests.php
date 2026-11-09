@@ -231,8 +231,8 @@ try { arena.alloc(2); } catch (MemError e) { print("dead"); }
 CODE
 , "AAAA 65 4\n90\nbounds\nbyte-range\noverflow\n4\ndouble\nuaf\ndead\n"];
 
-$T[] = ['files & system access', <<<'CODE'
-path = "/tmp/pyhp_suite_file.txt";
+$T[] = ['files & system access', str_replace('@@SUITE_TMP@@', str_replace('\\', '/', sys_get_temp_dir()), <<<'CODE'
+path = "@@SUITE_TMP@@/pyhp_suite_file.txt";
 file_write(path, "one\ntwo");
 print(file_read(path));
 file_append(path, "\nthree");
@@ -246,8 +246,7 @@ print(env("PATH") != null);
 t1 = time();
 sleep(3);
 print(time() >= t1);
-CODE
-, "one\ntwo\n['one', 'two', 'three'] 3\ntrue\nfalse\npyhp-shell-ok true\ntrue\ntrue\n"];
+CODE), "one\ntwo\n['one', 'two', 'three'] 3\ntrue\nfalse\npyhp-shell-ok true\ntrue\ntrue\n"];
 
 $T[] = ['builtin functions', <<<'CODE'
 print(range(4), range(2, 5), range(10, 0, -3));
@@ -712,8 +711,12 @@ foreach ($T as $case) {
         $args = $opts;
         $files = [];
     }
-    $gotI = run_interpreter($code, $args, $files);
-    $gotC = run_compiled($code, $args, $phpBin, $files);
+    // normalise CRLF -> LF so the suite also passes from a Windows working
+    // copy (git autocrlf) or a zip extraction with CRLF text files
+    $norm = function (string $s): string { return str_replace("\r\n", "\n", $s); };
+    $expected = $norm($expected);
+    $gotI = $norm(run_interpreter($code, $args, $files));
+    $gotC = $norm(run_compiled($code, $args, $phpBin, $files));
     $okI = ($gotI === $expected);
     $okC = ($gotC === $expected);
     if ($okI && $okC) {
@@ -775,7 +778,7 @@ CODE
         $gotN = is_file($bin) ? (string)shell_exec(escapeshellarg($bin) . ' 2>&1') : "<<nobin>> " . $build;
         chdir($oldCwd);
         pyhp_test_cleanup($dir);
-        $okN = ($gotN === $expected);
+        $okN = (str_replace("\r\n", "\n", $gotN) === str_replace("\r\n", "\n", $expected));
         if ($okN) {
             $passed++;
             $results[] = sprintf("  %-46s %s", $name, "PASS (native)");

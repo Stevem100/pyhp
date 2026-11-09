@@ -1064,6 +1064,8 @@ function pyhp_builtins(): array {
             $outLines = [];
             $code = 0;
             @exec($a[0] . ' 2>&1', $outLines, $code);
+            // Windows console output keeps a trailing \r per line — strip it
+            $outLines = array_map(function ($l) { return rtrim($l, "\r"); }, $outLines);
             return new PyDict(['stdout' => implode("\n", $outLines), 'code' => $code]);
         }, 1, 1],
         'system' => [function (...$a) {

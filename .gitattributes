@@ -1,7 +1,14 @@
-# keep Windows batch files CRLF
+# keep Windows shell scripts CRLF
 *.bat text eol=crlf
-*.md text
-*.php text
-*.pyh text
-# keep PowerShell scripts CRLF on Windows checkout
 *.ps1 text eol=crlf
+# everything else textual: LF everywhere (including Windows checkouts),
+# so the test suite's expected-output blocks stay byte-stable on all OSes
+*.md   text eol=lf
+*.php  text eol=lf
+*.pyh  text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.yml  text eol=lf
+*.txt  text eol=lf
+*.cpp  text eol=lf
+LICENSE text eol=lf
