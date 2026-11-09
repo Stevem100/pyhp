@@ -1,6 +1,6 @@
 {
     "language": "PyHP",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "tagline": "PHP syntax, Python brains, C muscles.",
     "fileExtension": ".pyh",
     "runtime": "PHP 8.0+ CLI, no extensions",
@@ -211,6 +211,14 @@
             "pyhp pkg list"
         ],
         "vendorDir": "vendor/"
+    },
+    "selfUpdate": {
+        "version": "pyhp version [--check] — local info; --check queries GitHub for the latest release",
+        "update": "pyhp update [--force] [--main] — download the latest GitHub release zip and copy it over the install dir, preserving bundled php/ and vendor/; git clones update via git pull --ff-only",
+        "channels": {
+            "release": "https://api.github.com/repos/Stevem100/pyhp/releases/latest (default)",
+            "main": "https://codeload.github.com/Stevem100/pyhp/zip/refs/heads/main (--main, also the API-unreachable fallback)"
+        }
     },
     "stdlib": {
         "ai": {

@@ -1,4 +1,6 @@
-# PyHP 0.3.0
+# PyHP 0.4.0
+
+[![CI](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml/badge.svg)](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml)
 
 **PHP syntax. Python brains. C muscles.**
 
@@ -19,9 +21,12 @@ PyHP ships with **three execution paths** built from the same front-end:
 
 All paths share the exact same data model, so the 35-case test suite passes every program through the engines and asserts byte-identical output.
 
-New in 0.3.0: **C++ native blocks + a native C++ backend**, a **stdlib** with
-`ai` (machine learning), `sec` (security research) and `iot` (telemetry &
-framing) modules, JSON/crypto built-ins, and domain guides in
+New in 0.4.0: **`pyhp update` / `pyhp version`** — the CLI manages itself now (self-update
+from GitHub releases, `--check` for the latest version), and the repo ships **CI** that
+runs the full test suite after every commit plus an automated **release pipeline** that
+packages a zip for every `v*` tag. New in 0.3.0: **C++ native blocks + a native C++
+backend**, a **stdlib** with `ai` (machine learning), `sec` (security research) and
+`iot` (telemetry & framing) modules, JSON/crypto built-ins, and domain guides in
 [`docs/guides/`](docs/guides/). See [CHANGELOG.md](CHANGELOG.md).
 
 ---
@@ -70,6 +75,10 @@ php bin/pyhp build examples/07_native_cpp.pyh --target native -o /tmp/pyhp_demo
 php bin/pyhp run examples/08_ai_ml.pyh        # machine learning
 php bin/pyhp run examples/09_security.pyh     # security research toolkit
 php bin/pyhp run examples/10_iot.pyh          # IoT telemetry & framing
+
+# the CLI manages itself
+php bin/pyhp version --check                  # local version + latest on GitHub
+php bin/pyhp update                           # self-update in place (keeps php/ and vendor/)
 ```
 
 ### REPL in 60 seconds

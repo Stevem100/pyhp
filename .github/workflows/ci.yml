@@ -1,0 +1,30 @@
+name: CI
+
+# Runs the full PyHP test suite after every commit (push) and every PR.
+# The two native-backend tests compile with g++ when it is available and
+# skip gracefully otherwise, so this works on every runner.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    name: PHP ${{ matrix.php }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        php: ['8.2', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: zip, curl, phar
+          coverage: none
+
+      - name: Run test suite (interpreter + transpiler + native backend)
+        run: php tests/run_tests.php

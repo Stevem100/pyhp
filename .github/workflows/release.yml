@@ -1,0 +1,56 @@
+name: Release
+
+# On every v* tag: run the test suite, build pyhp-<version>.zip from the
+# tagged commit and attach it to an automatically created GitHub release.
+#   git tag -a v0.5.0 -m "..." && git push origin v0.5.0   ->  release appears
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: zip, curl, phar
+          coverage: none
+
+      - name: Run test suite before releasing
+        run: php tests/run_tests.php
+
+      - name: Build release zip
+        run: |
+          V="${GITHUB_REF_NAME#v}"
+          git archive --format=zip --prefix=pyhp/ -o "pyhp-${V}.zip" HEAD
+          echo "built pyhp-${V}.zip"
+
+      - name: Create GitHub release and attach the zip
+        uses: softprops/action-gh-release@v2
+        with:
+          files: pyhp-*.zip
+          generate_release_notes: true
+          body: |
+            Download, unzip, done — no admin rights needed.
+
+            **Windows (recommended):** run the one-line installer in PowerShell
+            ```
+            irm https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 | iex
+            ```
+            or unzip this asset, double-click `install.bat`, and keep the folder anywhere you like.
+
+            **macOS / Linux:** unzip, then `alias pyhp='php /path/to/pyhp/bin/pyhp'`.
+
+            **Already installed?** Update in place:
+            ```
+            pyhp update
+            ```
+
+            Verified: the full test suite passed on this exact commit before packaging.

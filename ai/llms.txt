@@ -9,7 +9,7 @@
 > access) and first-class C++ (embed native code with `cpp { ... }` blocks, or
 > compile whole programs to a native binary).
 
-PyHP 0.3.0 runs on any PHP 8.0+ CLI with **three execution engines built from
+PyHP 0.4.0 runs on any PHP 8.0+ CLI with **three execution engines built from
 one front-end**: a tree-walking interpreter (`pyhp run`, `pyhp repl`), a
 transpiler that emits standalone PHP 8 (`pyhp build`, `pyhp compile`) and a
 native C++ backend (`pyhp build --target cpp|native` — needs g++/clang++). A

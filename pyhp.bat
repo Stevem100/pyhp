@@ -8,6 +8,8 @@ rem    pyhp run script.pyh [args...]          run with the built-in interpreter
 rem    pyhp compile script.pyh [args...]      transpile + run (fast path)
 rem    pyhp build script.pyh -o out.php       transpile to standalone PHP
 rem    pyhp repl                              interactive shell
+rem    pyhp version [--check]                 version info (--check: latest on GitHub)
+rem    pyhp update [--force] [--main]         self-update from GitHub releases
 rem
 rem  PHP lookup order:
 rem    1. PHP_BIN environment variable (php.exe path or its folder)

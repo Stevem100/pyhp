@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.0 — the CLI manages itself: `pyhp update` & `pyhp version`
+
+**New CLI commands**
+- **`pyhp update`** — self-update in place. Fetches the latest GitHub release
+  (via `api.github.com`), downloads the `pyhp-<ver>.zip` asset and copies it
+  over the install folder while **preserving your bundled `php/` runtime and
+  `vendor/` packages**. Falls back to the `main`-branch zip when the API is
+  unreachable, and switches to `git pull --ff-only` automatically when you run
+  from a git clone. Flags: `--force` (apply even if not newer), `--main`
+  (track the main branch instead of releases).
+- **`pyhp version`** — now prints the version, PHP version, install path and
+  install source; **`pyhp version --check`** also queries GitHub for the
+  latest release and tells you whether an update is available.
+
+**CI & release automation**
+- `.github/workflows/ci.yml` — the 35-case suite runs after **every commit**
+  (push) and every PR, on Ubuntu + Windows with PHP 8.2 and 8.3; the two
+  native-backend tests compile with g++ when present and skip otherwise.
+- `.github/workflows/release.yml` — tagging any `v*` tag runs the suite, then
+  builds `pyhp-<version>.zip` from the tagged commit (`git archive`, same
+  layout as the manual zips) and publishes a GitHub release with the asset,
+  release notes and install instructions. Releases now exist for every tag.
+
+**Docs & AI kit**
+- README: self-update/`--check` quick-start lines, CI badge, 0.4.0 notes.
+- `ai/pyhp-spec.json`: `cli` updated with `pyhp version [--check]`,
+  `pyhp update [--force] [--main]` and the release channels.
+
 ## 0.3.0 — C++ muscles become real, stdlib for AI / security / IoT
 
 **Language — C++ is now part of PyHP**

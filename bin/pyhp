@@ -1,14 +1,17 @@
 #!/usr/bin/env php
 <?php
 /**
- * PyHP 0.1.0 — CLI runner + REPL + transpiler driver.
+ * PyHP — CLI runner + REPL + transpiler driver + self-updater.
  *
  * Usage:
  *   php bin/pyhp run     <script.pyh> [args...]   run with the tree-walking interpreter
  *   php bin/pyhp build   <script.pyh> -o out.php  transpile to standalone PHP
  *   php bin/pyhp compile <script.pyh> [args...]   transpile + execute (fast path)
  *   php bin/pyhp repl                             interactive shell
- *   php bin/pyhp version | help
+ *   php bin/pyhp version [--check]                version info (+ latest on GitHub)
+ *   php bin/pyhp update [--force] [--main]        self-update from GitHub
+ *   php bin/pyhp pkg init|add|remove|list         package manager
+ *   php bin/pyhp help
  */
 
 require_once __DIR__ . '/../src/runtime.php';
@@ -31,11 +34,15 @@ PyHP {$v} — PHP syntax, Python brains, C muscles.
   pyhp compile <script.pyh> [args...]  transpile + run (fast path)
   pyhp repl                            start the interactive shell
   pyhp pkg init|add|remove|list        manage packages (vendor/ + pyhp.json)
+  pyhp version [--check]               show version info (--check: query GitHub)
+  pyhp update [--force] [--main]       update PyHP from GitHub releases
 
 Examples:
   php bin/pyhp run examples/01_hello.pyh
   php bin/pyhp build examples/01_hello.pyh -o /tmp/hello.php && php /tmp/hello.php
   php bin/pyhp pkg add mathx
+  php bin/pyhp version --check
+  php bin/pyhp update
   php bin/pyhp repl
 
 TXT;
@@ -245,6 +252,253 @@ function pyhp_balanced(string $s): bool {
 }
 
 /* ----------------------------------------------------------------- */
+/* version & self-update                                             */
+/* ----------------------------------------------------------------- */
+
+const PYHP_REPO_API  = 'https://api.github.com/repos/Stevem100/pyhp/releases/latest';
+const PYHP_REPO_MAIN = 'https://codeload.github.com/Stevem100/pyhp/zip/refs/heads/main';
+
+function pyhp_http_get(string $url): ?string {
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_USERAGENT      => 'pyhp-cli/' . PYHP_VERSION,
+            CURLOPT_TIMEOUT        => 180,
+        ]);
+        $data = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        curl_close($ch);
+        return ($code === 200 && is_string($data)) ? $data : null;
+    }
+    $ctx = stream_context_create(['http' => [
+        'header' => "User-Agent: pyhp-cli/" . PYHP_VERSION . "\r\n",
+        'timeout' => 180,
+        'follow_location' => 1,
+    ]]);
+    $data = @file_get_contents($url, false, $ctx);
+    return $data === false ? null : $data;
+}
+
+function pyhp_http_download(string $url, string $dest): bool {
+    if (function_exists('curl_init')) {
+        $fh = fopen($dest, 'wb');
+        if ($fh !== false) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_FILE           => $fh,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_USERAGENT      => 'pyhp-cli/' . PYHP_VERSION,
+                CURLOPT_TIMEOUT        => 600,
+            ]);
+            $ok = curl_exec($ch) === true && (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE) === 200;
+            curl_close($ch);
+            fclose($fh);
+            if ($ok && filesize($dest) > 0) return true;
+            @unlink($dest);
+        }
+    }
+    $ctx = stream_context_create(['http' => [
+        'header' => "User-Agent: pyhp-cli/" . PYHP_VERSION . "\r\n",
+        'timeout' => 600,
+        'follow_location' => 1,
+    ]]);
+    $data = @file_get_contents($url, false, $ctx);
+    if ($data !== false && file_put_contents($dest, $data) !== false && filesize($dest) > 0) return true;
+    foreach (['curl -fsSL', 'wget -qO-'] as $tool) {
+        exec($tool . ' ' . escapeshellarg($url) . ' > ' . escapeshellarg($dest) . ' 2>/dev/null', $o, $code);
+        if ($code === 0 && is_file($dest) && filesize($dest) > 0) return true;
+        @unlink($dest);
+    }
+    return false;
+}
+
+function pyhp_extract_zip(string $zipPath, string $dest): bool {
+    if (class_exists('ZipArchive')) {
+        $z = new ZipArchive();
+        if ($z->open($zipPath) === true) {
+            $ok = $z->extractTo($dest);
+            $z->close();
+            if ($ok) return true;
+        }
+    }
+    if (class_exists('PharData')) {
+        try {
+            $p = new PharData($zipPath);
+            $p->extractTo($dest, null, true);
+            return true;
+        } catch (Throwable $e) { /* fall through to shell tools */ }
+    }
+    if (DIRECTORY_SEPARATOR === '\\') {
+        $zp = str_replace('/', '\\', $zipPath);
+        $dp = str_replace('/', '\\', $dest);
+        exec('powershell -NoProfile -Command "Expand-Archive -Path ' . escapeshellarg($zp) .
+             ' -DestinationPath ' . escapeshellarg($dp) . ' -Force"', $o, $code);
+        return $code === 0;
+    }
+    exec('unzip -q -o ' . escapeshellarg($zipPath) . ' -d ' . escapeshellarg($dest), $o, $code);
+    return $code === 0;
+}
+
+/** copy every file/dir under $src over $dst, skipping top-level names in $skip */
+function pyhp_copy_over(string $src, string $dst, array $skip = []): int {
+    $n = 0;
+    $it = new RecursiveIteratorIterator(
+        new RecursiveDirectoryIterator($src, FilesystemIterator::SKIP_DOTS),
+        RecursiveIteratorIterator::SELF_FIRST);
+    foreach ($it as $item) {
+        $rel = $it->getSubPathName();
+        $top = strtok($rel, '/');
+        if (in_array($top, $skip, true)) continue;
+        $target = $dst . '/' . $rel;
+        if ($item->isDir()) {
+            if (!is_dir($target)) @mkdir($target, 0777, true);
+        } else {
+            if (!is_dir(dirname($target))) @mkdir(dirname($target), 0777, true);
+            if (@copy($item->getPathname(), $target)) $n++;
+        }
+    }
+    return $n;
+}
+
+function pyhp_install_root(): string {
+    return dirname(__DIR__);
+}
+
+function pyhp_latest_release(): ?array {
+    $j = pyhp_http_get(PYHP_REPO_API);
+    if ($j === null) return null;
+    $d = json_decode($j, true);
+    if (!is_array($d) || empty($d['tag_name'])) return null;
+    $assets = [];
+    foreach (($d['assets'] ?? []) as $a) {
+        if (isset($a['name'], $a['browser_download_url']) && str_ends_with(strtolower($a['name']), '.zip')) {
+            $assets[] = $a;
+        }
+    }
+    return [
+        'tag'     => (string)$d['tag_name'],
+        'version' => ltrim((string)$d['tag_name'], 'vV'),
+        'assets'  => $assets,
+        'url'     => $d['html_url'] ?? ('https://github.com/Stevem100/pyhp/releases'),
+    ];
+}
+
+function pyhp_version_cmd(array $args): int {
+    $root = pyhp_install_root();
+    echo "PyHP " . PYHP_VERSION . "\n";
+    echo "php     : " . PHP_VERSION . " (" . PHP_SAPI . ")\n";
+    echo "install : " . $root . "\n";
+    echo "source  : " . (is_dir($root . '/.git')
+        ? "git clone ('pyhp update' runs git pull)"
+        : "release install ('pyhp update' pulls GitHub releases)") . "\n";
+    if (!in_array('--check', $args, true)) return 0;
+    $rel = pyhp_latest_release();
+    if ($rel === null) {
+        echo "latest  : (github.com unreachable or rate-limited right now)\n";
+        return 0;
+    }
+    $up = version_compare($rel['version'], PYHP_VERSION, '>');
+    echo "latest  : " . $rel['tag'] . ($up
+        ? "  — update available, run: pyhp update\n"
+        : "  — up to date\n");
+    return 0;
+}
+
+function pyhp_self_update(array $args): int {
+    $force   = in_array('--force', $args, true);
+    $useMain = in_array('--main', $args, true);
+    $root    = pyhp_install_root();
+    echo "PyHP " . PYHP_VERSION . " — checking for updates...\n";
+
+    /* git clone: update with git itself */
+    if (is_dir($root . '/.git')) {
+        exec('cd ' . escapeshellarg($root) . ' && git fetch origin 2>&1', $out, $code);
+        if ($code !== 0) {
+            fwrite(STDERR, "pyhp update: git fetch failed:\n  " . implode("\n  ", array_slice($out, 0, 5)) . "\n");
+            return 1;
+        }
+        exec('cd ' . escapeshellarg($root) . ' && git log --oneline HEAD..origin/main 2>&1', $behind, $c2);
+        if ($c2 === 0 && count($behind) === 0) {
+            echo "already up to date (git clone is at the latest main)\n";
+            return 0;
+        }
+        exec('cd ' . escapeshellarg($root) . ' && git pull --ff-only origin main 2>&1', $pulled, $c3);
+        echo implode("\n", array_slice($pulled, 0, 12)) . "\n";
+        if ($c3 !== 0) {
+            fwrite(STDERR, "pyhp update: git pull failed (local changes?) — fix manually or reinstall\n");
+            return 1;
+        }
+        echo "done. run: pyhp version\n";
+        return 0;
+    }
+
+    /* release install: pick what to download */
+    $rel = $useMain ? null : pyhp_latest_release();
+    $zipUrl = null; $label = null; $ver = null;
+    if ($useMain) {
+        $zipUrl = PYHP_REPO_MAIN; $label = 'main branch'; $ver = 'main';
+    } elseif ($rel === null) {
+        echo "  (could not reach the GitHub releases API — falling back to the main branch)\n";
+        $zipUrl = PYHP_REPO_MAIN; $label = 'main branch'; $ver = 'main';
+    } else {
+        if (!$force && version_compare($rel['version'], PYHP_VERSION, '<=')) {
+            echo "already up to date (latest release: " . $rel['tag'] . ")\n";
+            return 0;
+        }
+        $ver = $rel['version'];
+        $label = $rel['tag'];
+        $zipUrl = null;
+        foreach ($rel['assets'] as $a) {
+            if (stripos($a['name'], 'pyhp') !== false) { $zipUrl = $a['browser_download_url']; break; }
+        }
+        if ($zipUrl === null && count($rel['assets']) > 0) $zipUrl = $rel['assets'][0]['browser_download_url'];
+        if ($zipUrl === null) $zipUrl = 'https://codeload.github.com/Stevem100/pyhp/zip/refs/tags/' . $rel['tag'];
+    }
+
+    $tmp = sys_get_temp_dir() . '/pyhp-update-' . getmypid() . '-' . uniqid();
+    if (!@mkdir($tmp . '/x', 0777, true)) {
+        fwrite(STDERR, "pyhp update: cannot create temp dir {$tmp}\n");
+        return 1;
+    }
+    $zipPath = $tmp . '/pyhp.zip';
+    echo "downloading {$label}...\n";
+    if (!pyhp_http_download($zipUrl, $zipPath)) {
+        fwrite(STDERR, "pyhp update: download failed ({$zipUrl})\n");
+        exec((DIRECTORY_SEPARATOR === '\\' ? 'rmdir /S /Q ' : 'rm -rf ') . escapeshellarg($tmp));
+        return 1;
+    }
+    echo "extracting...\n";
+    if (!pyhp_extract_zip($zipPath, $tmp . '/x')) {
+        fwrite(STDERR, "pyhp update: could not extract the downloaded zip\n");
+        exec((DIRECTORY_SEPARATOR === '\\' ? 'rmdir /S /Q ' : 'rm -rf ') . escapeshellarg($tmp));
+        return 1;
+    }
+    $inner = null;
+    foreach (scandir($tmp . '/x') ?: [] as $d) {
+        if ($d[0] === '.') continue;
+        if (is_file($tmp . '/x/' . $d . '/bin/pyhp') && is_file($tmp . '/x/' . $d . '/src/runtime.php')) {
+            $inner = $tmp . '/x/' . $d;
+            break;
+        }
+    }
+    if ($inner === null) {
+        fwrite(STDERR, "pyhp update: unexpected zip layout (no bin/pyhp + src/runtime.php inside)\n");
+        exec((DIRECTORY_SEPARATOR === '\\' ? 'rmdir /S /Q ' : 'rm -rf ') . escapeshellarg($tmp));
+        return 1;
+    }
+    $newV = 'unknown';
+    $rt = (string)@file_get_contents($inner . '/src/runtime.php');
+    if (preg_match("/PYHP_VERSION\\s*=\\s*'([^']+)'/", $rt, $m)) $newV = $m[1];
+    $n = pyhp_copy_over($inner, $root, ['php', '.git']);
+    exec((DIRECTORY_SEPARATOR === '\\' ? 'rmdir /S /Q ' : 'rm -rf ') . escapeshellarg($tmp));
+    echo "updated {$n} files -> {$root}\n";
+    echo "PyHP updated to {$newV}. New shells pick it up automatically; run: pyhp version\n";
+    return 0;
+}
+
+/* ----------------------------------------------------------------- */
 /* package manager (pyhp pkg)                                        */
 /* ----------------------------------------------------------------- */
 
@@ -437,9 +691,11 @@ if ($cmd === null || $cmd === 'help' || $cmd === '--help' || $cmd === '-h') {
     pyhp_usage();
     exit(0);
 }
-if ($cmd === 'version' || $cmd === '--version') {
-    echo "PyHP " . PYHP_VERSION . "\n";
-    exit(0);
+if ($cmd === 'version' || $cmd === '--version' || $cmd === '-v') {
+    exit(pyhp_version_cmd(array_slice($argv, 2)));
+}
+if ($cmd === 'update') {
+    exit(pyhp_self_update(array_slice($argv, 2)));
 }
 if ($cmd === 'repl') {
     exit(pyhp_repl());

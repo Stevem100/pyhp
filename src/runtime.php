@@ -15,7 +15,7 @@
 if (defined('PYHP_RUNTIME')) { return; }
 define('PYHP_RUNTIME', '1');
 
-const PYHP_VERSION = '0.3.0';
+const PYHP_VERSION = '0.4.0';
 
 /* =========================================================================
  * 1. Errors

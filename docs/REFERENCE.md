@@ -1,4 +1,4 @@
-# PyHP 0.3.0 — Complete Reference
+# PyHP 0.4.0 — Complete Reference
 
 **PHP syntax. Python brains. C muscles.**
 
@@ -539,6 +539,6 @@ Domain walkthroughs live in [`guides/AI-DEVELOPMENT.md`](guides/AI-DEVELOPMENT.m
 
 ---
 
-*This reference describes PyHP 0.3.0. Machine-readable versions for AI
+*This reference describes PyHP 0.4.0. Machine-readable versions for AI
 tooling live in [`ai/pyhp-spec.json`](../ai/pyhp-spec.json) and
 [`ai/llms.txt`](../ai/llms.txt).*
