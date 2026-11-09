@@ -1,4 +1,4 @@
-# PyHP 0.4.1
+# PyHP 0.5.0
 
 [![CI](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml/badge.svg)](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml)
 
@@ -19,9 +19,14 @@ PyHP ships with **three execution paths** built from the same front-end:
 2. **A transpiler** — PyHP → clean, standalone PHP 8 source (`pyhp build` / `pyhp compile`) that runs natively and requires only `src/runtime.php`.
 3. **A native C++ backend** — PyHP → single-file C++17 → machine code (`pyhp build --target cpp|native`). Your embedded `cpp { ... }` blocks go straight into the binary: no PHP, no interpreter, no FFI.
 
-All paths share the exact same data model, so the 35-case test suite passes every program through the engines and asserts byte-identical output.
+All paths share the exact same data model, so the 37-case test suite passes every program through the engines and asserts byte-identical output.
 
-New in 0.4.1: **`pyhp` everywhere** — a one-line **macOS / Linux installer**
+New in 0.5.0: **keyword arguments** — call functions, methods and constructors
+with `name = value` arguments (Python style): `greet(name = "Ada")`,
+`sorted(xs, key = f, reverse = true)`, `super(x, sound = "Woof")` — in the
+interpreter and the transpiler alike. Windows now installs to **`C:\phpl` by
+default** and `pyhp update` keeps that folder current in place. New in
+0.4.1: **`pyhp` everywhere** — a one-line **macOS / Linux installer**
 (`install.sh`) that puts a `pyhp` launcher on your PATH, so every documented
 command is now plain `pyhp run` / `pyhp build` on all three OSes. New in
 0.4.0: **`pyhp update` / `pyhp version`** — the CLI manages itself now (self-update
@@ -44,8 +49,9 @@ Requirements: PHP 8.0+ (CLI). No extensions needed.
 > irm https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 | iex
 > ```
 >
-> The installer sets up PyHP *and* PHP 8.3 (only if you don't already have PHP),
-> adds `pyhp` to your PATH, and runs a smoke test. Full details, parameters and
+> The installer sets up PyHP *and* PHP 8.3 (only if you don't already have PHP)
+> into **`C:\phpl`**, adds `pyhp` to your PATH, and runs a smoke test —
+> `pyhp update` then keeps that folder current forever. Full details, parameters and
 > a manual route: [INSTALL-WINDOWS.md](INSTALL-WINDOWS.md).
 
 > **macOS / Linux?** One line in a terminal — no admin rights:
@@ -58,6 +64,17 @@ Requirements: PHP 8.0+ (CLI). No extensions needed.
 > don't), installs PyHP to `~/.local/share/pyhp`, drops a `pyhp` launcher into
 > `~/.local/bin`, and runs a smoke test. From an unzipped release or a clone:
 > `./install.sh --local .` — uninstall any time with `./uninstall.sh`.
+
+> **Already installed an older PyHP (0.1.x–0.3.x)?** `pyhp update` only exists
+> from **0.4.0** on — on older installs it prints `unknown command 'update'`
+> (and a banner like `PyHP 0.1.0`). Jump straight to the latest version by
+> re-running the one-line installer above; it upgrades the install folder in
+> place and keeps your code. Then check `pyhp version`.
+>
+> If `pyhp version` still shows an old version, an old install folder is still
+> winning the PATH race: run `uninstall.ps1` (Windows) from that folder, or
+> delete it and reopen the terminal. From 0.4.0 on you'll never have to do
+> this again — `pyhp update` keeps every future install current in place.
 
 ```bash
 # run with the built-in interpreter
@@ -73,7 +90,7 @@ php hello.php extra cli args   # -> available as argv()
 # interactive shell
 pyhp repl
 
-# run the test suite (35 cases across all engines)
+# run the test suite (37 cases across all engines)
 php tests/run_tests.php
 
 # packages: install from the bundled registry, then require()
@@ -326,7 +343,6 @@ primary     = INT | FLOAT | STRING | FSTRING | "true" | "false" | "null" | ident
 
 ## Roadmap
 
-* keyword arguments in calls, `sorted(xs, key=f)`
 * class exports across modules + module-level state in compiled mode
 * classes and lambdas in the native C++ backend (currently PHP-engine only)
 * list/float types across the C++ bridge (currently int64_t/double/const char*)

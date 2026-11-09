@@ -1,9 +1,9 @@
-# PyHP 0.4.0 — Complete Reference
+# PyHP 0.5.0 — Complete Reference
 
 **PHP syntax. Python brains. C muscles.**
 
 Every command, statement, operator, builtin and method in the language —
-verified against the implementation by the 35-case test suite, which runs every
+verified against the implementation by the 37-case test suite, which runs every
 program through the execution engines (interpreter, PHP transpiler and, where a
 C++ compiler is present, the native C++ backend) and requires byte-identical
 output.
@@ -157,10 +157,20 @@ function checked(int a) -> int { return a; }           // typed params + return 
 
 add(1, 2);
 greet("ada", "?");
+greet("ada", punct = "!!");                            // keyword argument
 double = lambda n: n * 2;                              // lambda: params, colon, one expression
 ```
 
 - Default parameter values and `...` variadics are supported.
+- **Keyword arguments**: pass `name = value` in any call (Python style). They
+  bind by parameter name, in any order, after the positional arguments:
+  `greet(name = "ada", punct = "?")`. Works for plain functions, methods,
+  constructors (`Animal(sound = "meow")`), `this.method(kw = v)`,
+  `obj.method(kw = v)` and `super(...)` calls.
+- Errors mirror Python: unexpected keyword, duplicate value for the same
+  parameter (`f(1, a = 2)`), and positional-after-keyword are all detected.
+- Builtins: `sorted(xs, key = f, reverse = true)` accepts `key` and `reverse`;
+  other builtins take positional arguments only.
 - Closures capture by name from the defining scope; recursion works.
 - Functions are first-class values: `g = add; map(double, xs)`.
 - `return` without a value returns `null`.
@@ -296,7 +306,7 @@ Arity is `min..max` (`n` = unlimited).
 | `filter(f, iter)` | 2..2 | keep items where truthy(f(item)) |
 | `zip(it, ...)` | 1..n | list of `[a, b, ...]` tuples, shortest wins |
 | `enumerate(iter, start = 0)` | 1..2 | list of `[index, item]` |
-| `sorted(iter)` | 1..1 | new sorted list (no key function yet) |
+| `sorted(iter, key = f, reverse = b)` | 1..1 | new sorted list; optional `key` mapping function and `reverse` flag (keyword arguments) |
 | `reversed(iter)` | 1..1 | new reversed list |
 | `sum(iter, start = 0)` | 1..2 | sum of numbers |
 | `any(iter)` / `all(iter)` | 1..1 | Python truthiness semantics |

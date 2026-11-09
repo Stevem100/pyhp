@@ -64,8 +64,7 @@ class PyHPInterpreter
     private function freshRootEnv(): PyHPEnv {
         $env = new PyHPEnv(null);
         foreach (array_keys(pyhp_builtins()) as $name) {
-            $fn = fn(...$args) => pyhp_call_builtin($name, $args);
-            $env->declare($name, $fn);
+            $env->declare($name, new PyHPBuiltin($name));
         }
         return $env;
     }
@@ -438,7 +437,7 @@ class PyHPInterpreter
         return $chain;
     }
 
-    private function instantiate(ClassDef $cls, array $args): InterpInstance {
+    private function instantiate(ClassDef $cls, array $args, array $kwargs = []): InterpInstance {
         $inst = new InterpInstance($cls);
         // property defaults: parent first, then child (in declaration order)
         foreach ($this->chainClasses($cls) as $c) {
@@ -461,19 +460,19 @@ class PyHPInterpreter
             }
         }
         $ctor = $this->findMethod($cls, '__construct') ?? $this->findMethod($cls, '__init');
-        if ($ctor !== null) $this->invokeMethodWithSuper($inst, $ctor, $args);
+        if ($ctor !== null) $this->invokeMethodWithSuper($inst, $ctor, $args, $kwargs);
         return $inst;
     }
 
-    private function invokeMethodWithSuper(InterpInstance $inst, InterpFunc $f, array $args) {
-        return $this->callFunction($f, $args, $inst, $f->cls);
+    private function invokeMethodWithSuper(InterpInstance $inst, InterpFunc $f, array $args, array $kwargs = []) {
+        return $this->callFunction($f, $args, $inst, $f->cls, $kwargs);
     }
 
-    public function invokeFunc(InterpFunc $f, array $args) {
-        return $this->callFunction($f, $args, null, null);
+    public function invokeFunc(InterpFunc $f, array $args, array $kwargs = []) {
+        return $this->callFunction($f, $args, null, null, $kwargs);
     }
 
-    private function callFunction(InterpFunc $f, array $args, ?InterpInstance $thisInst, ?ClassDef $superCls) {
+    private function callFunction(InterpFunc $f, array $args, ?InterpInstance $thisInst, ?ClassDef $superCls, array $kwargs = []) {
         if (++$this->depth > self::MAX_DEPTH) {
             $this->depth--;
             throw new PyHPRuntimeError("stack overflow: recursion deeper than " . self::MAX_DEPTH . " calls");
@@ -485,25 +484,46 @@ class PyHPInterpreter
             if ($thisInst !== null) $env->declare('this', $thisInst);
             if ($superCls !== null) $env->declare('__supercls', $superCls);
 
-            // bind parameters
+            // bind parameters: positional first (in order), then keyword arguments
             $nNamed = 0;
             foreach ($f->params as $p) { if (!$p['variadic']) $nNamed++; }
             $given = count($args);
-            if (!$this->hasVariadic($f->params) && $given > $nNamed) {
+            $hasVar = $this->hasVariadic($f->params);
+            if (!$hasVar && $given > $nNamed) {
                 throw new PyHPTypeError("{$f->name}() takes {$nNamed} argument(s), {$given} given");
             }
             if ($f->native !== null) {
+                if (count($kwargs) > 0) {
+                    throw new PyHPTypeError("{$f->name}() does not accept keyword arguments");
+                }
                 return ($f->native)($env, $args);
+            }
+            $namedNames = [];
+            foreach ($f->params as $p) { if (!$p['variadic']) $namedNames[] = $p['name']; }
+            $values = array_slice($args, 0, $nNamed);
+            while (count($values) < $nNamed) { $values[] = null; }
+            $filled = [];
+            for ($i = 0; $i < $nNamed; $i++) { $filled[$i] = $i < $given; }
+            foreach ($kwargs as $kw) {
+                $idx = array_search($kw['name'], $namedNames, true);
+                if ($idx === false) {
+                    throw new PyHPTypeError("{$f->name}() got an unexpected keyword argument '{$kw['name']}'");
+                }
+                if ($filled[$idx]) {
+                    throw new PyHPTypeError("{$f->name}() got multiple values for argument '{$kw['name']}'");
+                }
+                $values[$idx] = $kw['value'];
+                $filled[$idx] = true;
             }
             $i = 0;
             foreach ($f->params as $p) {
                 if ($p['variadic']) {
-                    $rest = array_slice($args, $i);
+                    $rest = array_slice($args, $nNamed);
                     $env->declare($p['name'], new PyList($rest));
                     break;
                 }
-                if ($i < $given) {
-                    $v = $args[$i];
+                if ($filled[$i]) {
+                    $v = $values[$i];
                 } elseif ($p['def'] !== null) {
                     $v = $this->evalExpr($p['def'], $env);
                 } else {
@@ -711,7 +731,7 @@ class PyHPInterpreter
             throw new PyHPError("line {$line}: " . pyhp_type_name($obj) . " object has no property '{$name}'");
         }
         if (is_object($obj)) {
-            if ($obj instanceof Closure || $obj instanceof InterpFunc) {
+            if ($obj instanceof Closure || $obj instanceof InterpFunc || $obj instanceof PyHPBuiltin) {
                 throw new PyHPError("line {$line}: functions have no property '{$name}'");
             }
             if ($obj instanceof PyDict && array_key_exists($name, $obj->d)
@@ -812,13 +832,17 @@ class PyHPInterpreter
         $callee = $e['callee'];
         $args = [];
         foreach ($e['args'] as $a) { $args[] = $this->evalExpr($a, $env); }
+        $kws = [];
+        foreach (($e['kwargs'] ?? []) as $kw) {
+            $kws[] = ['name' => $kw['name'], 'value' => $this->evalExpr($kw['expr'], $env)];
+        }
 
         // super handling
         if ($callee['k'] === 'Super') {
-            return $this->callSuperConstructor($args, $env, $e['line']);
+            return $this->callSuperConstructor($args, $kws, $env, $e['line']);
         }
         if ($callee['k'] === 'Member' && $callee['obj']['k'] === 'Super') {
-            return $this->callSuperMethod($callee['name'], $args, $env, $e['line']);
+            return $this->callSuperMethod($callee['name'], $args, $kws, $env, $e['line']);
         }
         if ($callee['k'] === 'Member' && $callee['obj']['k'] === 'This') {
             $inst = $env->get('this');
@@ -827,7 +851,7 @@ class PyHPInterpreter
                 if ($f === null) {
                     throw new PyHPError("line {$e['line']}: " . pyhp_type_name($inst) . " has no method '{$callee['name']}'");
                 }
-                return $this->invokeMethodWithSuper($inst, $f, $args);
+                return $this->invokeMethodWithSuper($inst, $f, $args, $kws);
             }
         }
         if ($callee['k'] === 'Member') {
@@ -837,11 +861,14 @@ class PyHPInterpreter
                 if ($f === null) {
                     throw new PyHPError("line {$e['line']}: " . pyhp_type_name($obj) . " has no method '{$callee['name']}'");
                 }
-                return $this->invokeMethodWithSuper($obj, $f, $args);
+                return $this->invokeMethodWithSuper($obj, $f, $args, $kws);
             }
             if (is_object($obj)) {
                 try {
                     if (method_exists($obj, $callee['name'])) {
+                        if (count($kws) > 0) {
+                            return pyhp_call_kw_method($obj, $callee['name'], $args, $kws, $callee['name']);
+                        }
                         return $obj->{$callee['name']}(...$args);
                     }
                 } catch (ArgumentCountError $err) {
@@ -852,10 +879,13 @@ class PyHPInterpreter
                 // callables stored in dicts (module tables) are dot-callable
                 if ($obj instanceof PyDict && array_key_exists($callee['name'], $obj->d)
                     && is_callable($obj->d[$callee['name']])) {
-                    return pyhp_callfunc($obj->d[$callee['name']], $args, $callee['name']);
+                    return pyhp_callfunc($obj->d[$callee['name']], $args, $callee['name'], $kws);
                 }
             }
             if (is_string($obj)) {
+                if (count($kws) > 0) {
+                    throw new PyHPTypeError("line {$e['line']}: string methods do not accept keyword arguments yet");
+                }
                 return pyhp_str_method($obj, $callee['name'], $args);
             }
             throw new PyHPError("line {$e['line']}: '" . pyhp_type_name($obj) . "' object has no method '{$callee['name']}'");
@@ -867,20 +897,32 @@ class PyHPInterpreter
                 if (!is_callable($target)) {
                     throw new PyHPTypeError("line {$e['line']}: '{$name}' is not callable (" . pyhp_type_name($target) . ")");
                 }
+                if ($target instanceof InterpFunc) {
+                    return $this->invokeFunc($target, $args, $kws);
+                }
+                if ($target instanceof PyHPBuiltin) {
+                    return pyhp_call_builtin($target->name, $args, $kws);
+                }
+                if (count($kws) > 0) {
+                    throw new PyHPTypeError("line {$e['line']}: '{$name}' does not accept keyword arguments");
+                }
                 return $target(...$args);
             }
             if ($name === 'require') {
+                if (count($kws) > 0) {
+                    throw new PyHPError("line {$e['line']}: require() takes exactly 1 argument(s)");
+                }
                 return $this->loadModule($args, $e['line']);
             }
             $cls = $this->clsFind($name);
             if ($cls !== null) {
-                return $this->instantiate($cls, $args);
+                return $this->instantiate($cls, $args, $kws);
             }
             if (pyhp_builtin_exists($name)) {
-                return pyhp_call_builtin($name, $args);
+                return pyhp_call_builtin($name, $args, $kws);
             }
             if (PyHPCppNative::has($name)) { // native cpp export (lazy compile on first call)
-                return PyHPCppNative::call($name, $args);
+                return PyHPCppNative::call($name, $args, $kws);
             }
             throw new PyHPError("line {$e['line']}: undefined function '{$name}'");
         }
@@ -889,26 +931,32 @@ class PyHPInterpreter
         if (!is_callable($target)) {
             throw new PyHPTypeError("line {$e['line']}: expression is not callable (" . pyhp_type_name($target) . ")");
         }
+        if ($target instanceof InterpFunc) {
+            return $this->invokeFunc($target, $args, $kws);
+        }
+        if (count($kws) > 0) {
+            throw new PyHPTypeError("line {$e['line']}: expression does not accept keyword arguments");
+        }
         return $target(...$args);
     }
 
-    private function callSuperConstructor(array $args, PyHPEnv $env, int $line) {
+    private function callSuperConstructor(array $args, array $kws, PyHPEnv $env, int $line) {
         [$inst, $parent] = $this->superContext($env, $line);
         $ctor = $this->findMethod($parent, '__construct') ?? $this->findMethod($parent, '__init');
         if ($ctor !== null) {
             // keep __supercls pointing at the class that DEFINES the ctor
-            $this->callFunction($ctor, $args, $inst, $ctor->cls);
+            $this->callFunction($ctor, $args, $inst, $ctor->cls, $kws);
         }
         return null;
     }
 
-    private function callSuperMethod(string $name, array $args, PyHPEnv $env, int $line) {
+    private function callSuperMethod(string $name, array $args, array $kws, PyHPEnv $env, int $line) {
         [$inst, $parent] = $this->superContext($env, $line);
         $f = $this->findMethod($parent, $name);
         if ($f === null) {
             throw new PyHPError("line {$line}: parent class has no method '{$name}'");
         }
-        return $this->callFunction($f, $args, $inst, $f->cls);
+        return $this->callFunction($f, $args, $inst, $f->cls, $kws);
     }
 
     private function superContext(PyHPEnv $env, int $line): array {

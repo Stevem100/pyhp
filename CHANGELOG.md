@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.0 — keyword arguments, Windows installs to `C:\phpl`
+
+**Keyword arguments (Python style)**
+- Pass `name = value` arguments in any call: functions
+  (`greet(name = "Ada")`), methods (`this.add(b = 40, a = 2)`,
+  `obj.method(kw = v)`), constructors (`Animal(sound = "meow")`) and
+  `super(...)` calls (`super(name, sound = "Woof")`).
+- Keyword arguments bind by parameter name after the positional ones, in any
+  order; defaults still apply for anything left out. Both engines agree:
+  the interpreter binds kwargs directly, the transpiler emits
+  `pyhp_call_kw`-style helpers that bind via reflection.
+- Errors mirror Python: `got an unexpected keyword argument`,
+  `got multiple values for argument`, `takes N argument(s), M given`,
+  `missing required argument`, plus a parse-time
+  `positional argument after keyword argument`.
+- **`sorted(xs, key = f, reverse = true)`** — the headline use from the
+  roadmap works; `sorted` accepts `key` and `reverse` on both engines
+  (decorate-sort-undecorate, stable like Python's sort).
+- Builtins other than `sorted`, string methods and native cpp exports accept
+  positional arguments only and say so clearly.
+- Builtins in the interpreter's global env are now `PyHPBuiltin` wrappers that
+  route kwargs correctly — first-class use (`map(len, xs)`, `g = sorted`)
+  is unchanged.
+
+**Windows installs to `C:\phpl`**
+- `install.ps1` now defaults to **`C:\phpl`** (was `%LOCALAPPDATA%\Programs\PyHP`)
+  — matches the usual PHP-folder habit, short and PATH-friendly. `-InstallDir`
+  still overrides; if the folder cannot be written (restrictive ACL on `C:\`),
+  the installer prints three concrete fixes instead of a cryptic error.
+- `pyhp update` updates the folder the running install lives in — for the new
+  default that means `C:\phpl` in place, preserving a bundled `php\` and any
+  `vendor\` packages. `uninstall.ps1` knows the new default too.
+- INSTALL-WINDOWS.md gained an **"Upgrading from PyHP 0.1.x–0.3.x"** section
+  (re-run the installer once; from then on `pyhp update` suffices) and current
+  counts, layout and troubleshooting rows.
+
 ## 0.4.1 — `pyhp` everywhere: one-line Unix installer, no more `php bin/pyhp`
 
 **macOS / Linux are first-class now**

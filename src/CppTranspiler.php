@@ -810,6 +810,9 @@ class PyHPCppTranspiler
 
     private function emitCall(array $e, string $sc): string {
         $callee = $e['callee'];
+        if (!empty($e['kwargs'])) {
+            $this->err('keyword arguments are not supported by the native backend yet — pass positional arguments', $e['line']);
+        }
         $args = '{' . implode(', ', array_map(fn($a) => $this->emitExpr($a, $sc), $e['args'])) . '}';
         if ($callee['k'] === 'Super') {
             $this->err('super() requires classes, which the native backend does not support yet', $e['line']);

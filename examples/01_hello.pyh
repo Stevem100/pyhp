@@ -1,6 +1,7 @@
 // ============================================================
 // PyHP — Hello World & the basics
 // Run:  pyhp run examples/01_hello.pyh
+//       pyhp compile examples/01_hello.pyh   (same output, fast path)
 // ============================================================
 
 name = "PyHP";

@@ -1,6 +1,6 @@
 {
     "language": "PyHP",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "tagline": "PHP syntax, Python brains, C muscles.",
     "fileExtension": ".pyh",
     "runtime": "PHP 8.0+ CLI, no extensions",
@@ -8,7 +8,7 @@
         "interpreter": "tree-walking AST evaluator (pyhp run / pyhp repl)",
         "transpiler": "PyHP -> standalone PHP 8 (pyhp build / pyhp compile)",
         "nativeCpp": "PyHP -> single-file C++17 -> machine code (pyhp build --target cpp|native)",
-        "parity": "the 35-case test suite asserts byte-identical output across engines"
+        "parity": "the 37-case test suite asserts byte-identical output across engines"
     },
     "nativeCpp": {
         "cppBlocks": "cpp { ... } embeds C++17 in a .pyh file; functions declared with `// pyhp-export: <C decl>;` become callable from PyHP",
@@ -166,6 +166,7 @@
     ],
     "functions": {
         "declaration": "function name(a, b = 5) { ... }",
+        "kwargs": "f(name = value) — binds by parameter name in any order, after positionals; sorted(xs, key = f, reverse = true)",
         "typed": "function name(int a) string { ... }",
         "variadic": "function name(...xs) { ... }",
         "lambda": "double = lambda n: n * 2;",

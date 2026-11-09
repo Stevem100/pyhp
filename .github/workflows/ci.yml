@@ -55,3 +55,51 @@ jobs:
           test ! -e "$HOME/.local/share/pyhp"
           test ! -e "$HOME/.local/bin/pyhp"
           echo "uninstall OK"
+
+  windows-scripts:
+    name: Windows launcher & installer smoke
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: zip, curl
+          coverage: none
+
+      - name: PowerShell syntax check (install.ps1 / uninstall.ps1)
+        shell: pwsh
+        run: |
+          foreach ($f in 'install.ps1', 'uninstall.ps1') {
+            $errs = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path $f), [ref]$null, [ref]$errs) | Out-Null
+            if ($errs.Count -gt 0) {
+              $errs | ForEach-Object { Write-Host "$f:$($_.Extent.StartLineNumber): $($_.Message)" }
+              throw "PowerShell syntax errors in $f"
+            }
+            Write-Host "$f: syntax OK"
+          }
+
+      - name: Install to a custom dir (C:\phpl default needs no elevation here, but keep CI hermetic)
+        shell: pwsh
+        run: |
+          ./install.ps1 -InstallDir "$env:RUNNER_TEMP\pyhp-inst" -NoPath
+          & "$env:RUNNER_TEMP\pyhp-inst\pyhp.bat" version
+          & "$env:RUNNER_TEMP\pyhp-inst\pyhp.bat" run examples/01_hello.pyh | Select-Object -First 3
+
+      - name: pyhp update reports up to date (installed copy self-checks)
+        shell: pwsh
+        run: |
+          $out = & "$env:RUNNER_TEMP\pyhp-inst\pyhp.bat" update 2>&1 | Out-String
+          Write-Host $out
+          if ($out -notmatch 'up to date') { throw "expected 'up to date', got: $out" }
+
+      - name: Uninstall cleanly
+        shell: pwsh
+        run: |
+          $env:Path = "$env:RUNNER_TEMP\pyhp-inst;$env:Path"
+          & "$env:RUNNER_TEMP\pyhp-inst\uninstall.ps1" -InstallDir "$env:RUNNER_TEMP\pyhp-inst"
+          if (Test-Path "$env:RUNNER_TEMP\pyhp-inst") { throw "install dir still present" }
+          Write-Host "uninstall OK"

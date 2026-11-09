@@ -2,6 +2,7 @@
 // PyHP — The C DNA: bitwise ops, static typing, memory arena,
 //        files and shell access
 // Run:  pyhp run examples/04_c_dna.pyh
+//       pyhp compile examples/04_c_dna.pyh   (same output, fast path)
 // ============================================================
 
 // ---- hex / binary literals and bitwise operators --------------

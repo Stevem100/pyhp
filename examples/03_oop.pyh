@@ -1,6 +1,7 @@
 // ============================================================
 // PyHP — Classes, inheritance and exceptions (Python DNA)
 // Run:  pyhp run examples/03_oop.pyh
+//       pyhp compile examples/03_oop.pyh   (same output, fast path)
 // ============================================================
 
 class Shape {

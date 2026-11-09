@@ -151,6 +151,46 @@ try { add(1); } catch (TypeError e) { print("caught:", e.message); }
 CODE
 , "5\nHello, Ada! Yo, Bob!\n10\n144\n[1, 4, 9]\n3\n120\ncaught: add() missing required argument 'b'\n"];
 
+$T[] = ['keyword arguments', <<<'CODE'
+function greet(name, greeting = "Hello", punct = "!") { return greeting + ", " + name + punct; }
+print(greet("World"));
+print(greet("World", greeting = "Hi"));
+print(greet("World", punct = "?"));
+print(greet(name = "Ada", greeting = "Yo"));
+print(greet("Bob", "Yo", "!"));
+words = ["pear", "fig", "banana"];
+print(sorted(words, key = lambda w: len(w)));
+print(sorted(words, reverse = true));
+nums = [3, -1, 2];
+print(sorted(nums, key = lambda n: n * n));
+class Animal {
+    string sound = "...";
+    function __construct(sound = "...") { this.sound = sound; }
+    function speak(times = 1) {
+        out = "";
+        for (int i = 0; i < times; i++) { out += this.sound; }
+        return out;
+    }
+}
+class Dog extends Animal {
+    function __construct() { super(sound = "Woof"); }
+}
+d = Dog();
+print(d.speak(times = 2));
+CODE
+, "Hello, World!\nHi, World!\nHello, World?\nYo, Ada!\nYo, Bob!\n['fig', 'pear', 'banana']\n['pear', 'fig', 'banana']\n[-1, 2, 3]\nWoofWoof\n"];
+
+$T[] = ['keyword argument errors', <<<'CODE'
+function f(a, b = 2) { return a + b; }
+try { f(); } catch (TypeError e) { print("E1:", e.message); }
+try { f(1, 5, 6); } catch (TypeError e) { print("E2:", e.message); }
+try { f(1, c = 9); } catch (TypeError e) { print("E3:", e.message); }
+try { f(1, a = 9); } catch (TypeError e) { print("E4:", e.message); }
+try { sorted([1, 2], key = 5); } catch (TypeError e) { print("E5:", e.message); }
+print("done");
+CODE
+, "E1: f() missing required argument 'a'\nE2: f() takes 2 argument(s), 3 given\nE3: f() got an unexpected keyword argument 'c'\nE4: f() got multiple values for argument 'a'\nE5: sorted(): 'key' must be callable, got int\ndone\n"];
+
 $T[] = ['classes & inheritance', <<<'CODE'
 class Animal {
     string name;

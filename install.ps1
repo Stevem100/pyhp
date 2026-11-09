@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   One-command setup, no admin rights required:
-    - installs PyHP to a per-user folder (default: %LOCALAPPDATA%\Programs\PyHP)
+    - installs PyHP to a fixed folder (default: C:\phpl; change with -InstallDir)
     - reuses any PHP 8 already on the machine (PATH / PHP_BIN / bundled),
       otherwise downloads PHP 8.3 (NTS x64) into <InstallDir>\php
     - adds PyHP to your user PATH (opt out with -NoPath)
@@ -17,17 +17,23 @@
     curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 -o "%TEMP%\pyhp-install.ps1" && powershell -NoProfile -ExecutionPolicy Bypass -File "%TEMP%\pyhp-install.ps1"
 
   Parameters (download the script first, then pass them):
-    -InstallDir C:\pyhp    where to install (default %LOCALAPPDATA%\Programs\PyHP)
+    -InstallDir C:\pyhp    where to install (default C:\phpl)
     -NoPath                do not modify PATH
     -SkipPhp               never check or download PHP (you manage PHP yourself)
     -PhpZip <url>          use a specific PHP zip instead of the 8.3 latest build
 
+  Upgrading an older PyHP (0.1.x-0.3.x)? Just re-run this installer - it
+  installs the new version into C:\phpl, and from then on `pyhp update` keeps
+  that folder current forever. If an old install folder is still winning the
+  PATH race, run the uninstall.ps1 from THAT folder (or just delete the old
+  folder) and reopen your terminal.
+
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir C:\pyhp
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -InstallDir C:\phpl
 #>
 [CmdletBinding()]
 param(
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\PyHP'),
+    [string]$InstallDir = 'C:\phpl',
     [switch]$NoPath,
     [switch]$SkipPhp,
     [string]$PhpZip = ''
@@ -85,9 +91,21 @@ else {
 Write-Step "Copying PyHP into $InstallDir"
 try {
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    # probe write access before copying (C:\ root folders can be ACL-restricted)
+    $probe = Join-Path $InstallDir '.pyhp-write-test'
+    Set-Content -Path $probe -Value 'ok' -ErrorAction Stop
+    Remove-Item $probe -Force
     Copy-Item -Path (Join-Path $srcRoot '*') -Destination $InstallDir -Recurse -Force
 }
-catch { Die ("could not copy files - " + $_.Exception.Message) }
+catch {
+    if ($_.Exception.Message -match 'Access to the path|denied|UnauthorizedAccess') {
+        Die ("cannot write to $InstallDir - access denied.`n" +
+             "         Fixes: (a) run this PowerShell window as Administrator once,`n" +
+             "         (b) create the folder yourself first and grant your user write access, or`n" +
+             "         (c) pick a per-user folder instead: -InstallDir `"$env:LOCALAPPDATA\Programs\PyHP`"")
+    }
+    Die ("could not copy files - " + $_.Exception.Message)
+}
 Write-Ok 'PyHP core installed (bin, src, examples, tests, docs)'
 if ($tmpDir) { Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue }
 

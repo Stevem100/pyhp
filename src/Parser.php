@@ -541,15 +541,33 @@ class PyHPParser
             $line = $this->line();
             if ($this->atOp('(')) {
                 $args = [];
+                $kwargs = [];
+                $kwSeen = [];
                 $this->pos++;
                 while (!$this->atOp(')')) {
                     if ($this->atOp(',')) $this->pos++;
                     if ($this->atOp(')')) break;
-                    $args[] = $this->parseExpression();
+                    // keyword argument: IDENT '=' expr (a single '=', never '==')
+                    $n1 = $this->toks[$this->pos + 1] ?? null;
+                    if ($this->at('IDENT') && $n1 !== null && $n1['t'] === 'OP' && $n1['v'] === '=') {
+                        $kwLine = $this->line();
+                        $kwName = $this->adv()['v'];
+                        $this->pos++; // '='
+                        if (isset($kwSeen[$kwName])) {
+                            $this->err("keyword argument '{$kwName}' repeated in call");
+                        }
+                        $kwSeen[$kwName] = true;
+                        $kwargs[] = ['name' => $kwName, 'expr' => $this->parseExpression(), 'line' => $kwLine];
+                    } else {
+                        if (count($kwargs) > 0) {
+                            $this->err('positional argument after keyword argument');
+                        }
+                        $args[] = $this->parseExpression();
+                    }
                     if ($this->atOp(',')) $this->pos++;
                 }
                 $this->expectOp(')');
-                $e = ['k' => 'Call', 'callee' => $e, 'args' => $args, 'line' => $line];
+                $e = ['k' => 'Call', 'callee' => $e, 'args' => $args, 'kwargs' => $kwargs, 'line' => $line];
                 continue;
             }
             if ($this->atOp('[')) {

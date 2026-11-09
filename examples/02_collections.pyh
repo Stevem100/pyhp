@@ -1,6 +1,7 @@
 // ============================================================
 // PyHP — Lists, dicts, slicing and comprehensions (Python DNA)
 // Run:  pyhp run examples/02_collections.pyh
+//       pyhp compile examples/02_collections.pyh   (same output, fast path)
 // ============================================================
 
 // lists are dynamic and nest freely
@@ -51,7 +52,14 @@ print("filter:", filter(lambda x: x > 3, squares));
 print("zip:", zip(["a", "b", "c"], [1, 2, 3]));
 print("enumerate:", enumerate(["x", "y"]));
 print("sorted desc:", sorted([5, 2, 9, 1])[::-1]);
+print("sorted by len:", sorted(["pear", "fig", "banana"], key = lambda w: len(w)));
+print("sorted rev:", sorted([5, 2, 9, 1], reverse = true));
 print("any/all:", any([0, "", null, 7]), all([1, "x", true]));
+
+// keyword arguments: bind by parameter name, in any order
+function greet(name, greeting = "Hello", punct = "!") { return greeting + ", " + name + punct; }
+print(greet("Ada"));
+print(greet("Ada", greeting = "Yo", punct = "?"));
 
 // strings are objects with methods
 s = "  Hybrid Power  ";

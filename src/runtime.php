@@ -15,7 +15,7 @@
 if (defined('PYHP_RUNTIME')) { return; }
 define('PYHP_RUNTIME', '1');
 
-const PYHP_VERSION = '0.4.1';
+const PYHP_VERSION = '0.5.0';
 
 /* =========================================================================
  * 1. Errors
@@ -188,6 +188,24 @@ class InterpFunc {
     }
 }
 
+/** Placeholder for "argument not given" in positional slots — emitted by the
+ *  transpiler's kwarg calls and consumed by the prologue's default logic. */
+final class PyHPMissing {
+    private static ?PyHPMissing $inst = null;
+    private function __construct() {}
+    public static function get(): self { return self::$inst ??= new self(); }
+    public static function is($v): bool { return $v instanceof self; }
+}
+
+/** Callable wrapper for a builtin registered in the interpreter's global env.
+ *  Carries the builtin name so calls with keyword arguments can be routed to
+ *  pyhp_call_builtin() (plain closures would drop the kwargs). Still callable
+ *  like any first-class function value. */
+final class PyHPBuiltin {
+    public function __construct(public readonly string $name) {}
+    public function __invoke(...$args) { return pyhp_call_builtin($this->name, $args); }
+}
+
 class ClassDef {
     public string $name = '';
     public ?ClassDef $parent = null;
@@ -294,6 +312,7 @@ function pyhp_type_name($v): string {
     if ($v instanceof PyHPBuffer) return 'buffer';
     if ($v instanceof PyHPArena) return 'arena';
     if ($v instanceof InterpFunc) return 'function';
+    if ($v instanceof PyHPBuiltin) return 'function';
     if ($v instanceof Closure) return 'function';
     if ($v instanceof PyHPError) return $v->pyhpType;
     if ($v instanceof InterpInstance) return $v->cls->name;
@@ -373,6 +392,7 @@ function pyhp_tostr($v): string {
         return "<{$v->cls->name} object>";
     }
     if ($v instanceof Closure) return '<function>';
+    if ($v instanceof PyHPBuiltin) return '<function>';
     if (is_object($v)) {
         if (method_exists($v, '__toString')) return (string)$v;
         return '<' . pyhp_type_name($v) . ' object>';
@@ -634,17 +654,25 @@ function pyhp_slice_arr(array $a, $start, $stop, $step): array {
  * 8. Method dispatch (used by transpiled code for obj.method(...))
  * ========================================================================= */
 
-function pyhp_call_method($obj, string $name, array $args) {
+function pyhp_call_method($obj, string $name, array $args, array $kwargs = []) {
     try {
         if (is_object($obj) && method_exists($obj, $name)) {
+            if (count($kwargs) > 0) {
+                // reflection-based binding: covers transpiled user classes and
+                // builtin collection methods alike
+                return pyhp_call_kw_method($obj, $name, $args, $kwargs, $name);
+            }
             return $obj->$name(...$args);
         }
         // dict stored callables are reachable via dot-call (module tables etc.)
         if ($obj instanceof PyDict && array_key_exists($name, $obj->d) && is_callable($obj->d[$name])
             && !($obj->d[$name] instanceof PyList) && !($obj->d[$name] instanceof PyDict)) {
-            return pyhp_callfunc($obj->d[$name], $args, $name);
+            return pyhp_callfunc($obj->d[$name], $args, $name, $kwargs);
         }
         if (is_string($obj)) {
+            if (count($kwargs) > 0) {
+                throw new PyHPTypeError("string methods do not accept keyword arguments yet ('{$name}()')");
+            }
             return pyhp_str_method($obj, $name, $args);
         }
     } catch (ArgumentCountError $e) {
@@ -671,9 +699,15 @@ function pyhp_first_line(string $s): string {
     return $p === false ? $s : substr($s, 0, $p);
 }
 
-function pyhp_callfunc($c, array $args, string $name) {
+function pyhp_callfunc($c, array $args, string $name, array $kwargs = []) {
     if (!is_callable($c)) {
         throw new PyHPTypeError("'" . $name . "' is not callable (" . pyhp_type_name($c) . ")");
+    }
+    if (count($kwargs) > 0) {
+        if ($c instanceof InterpFunc) {
+            return $c->interp->invokeFunc($c, $args, $kwargs);
+        }
+        throw new PyHPTypeError("'{$name}' does not accept keyword arguments");
     }
     return $c(...$args);
 }
@@ -890,9 +924,7 @@ function pyhp_builtins(): array {
         }, 1, 2],
         'sorted' => [function (...$a) {
             pyhp_reg_errcheck($a, 'sorted', 1, 1);
-            $vals = pyhp_iter_values($a[0]);
-            usort($vals, fn($x, $y) => pyhp_compare($x, $y));
-            return new PyList($vals);
+            return pyhp_sorted_impl($a[0], null, false);
         }, 1, 1],
         'reversed' => [function (...$a) {
             pyhp_reg_errcheck($a, 'reversed', 1, 1);
@@ -1208,12 +1240,143 @@ function pyhp_val_to_json($v) {
     return $v;
 }
 
-function pyhp_call_builtin(string $name, array $args) {
+function pyhp_call_builtin(string $name, array $args, array $kwargs = []) {
+    if (count($kwargs) > 0) {
+        if ($name !== 'sorted') {
+            throw new PyHPTypeError("{$name}() does not accept keyword arguments");
+        }
+        if (count($args) !== 1) {
+            throw new PyHPTypeError('sorted() takes exactly 1 positional argument (' . count($args) . ' given)');
+        }
+        $key = null; $reverse = false;
+        foreach ($kwargs as $kw) {
+            switch ($kw['name']) {
+                case 'key':
+                    if ($key !== null) throw new PyHPTypeError("sorted() got multiple values for argument 'key'");
+                    $key = $kw['value'];
+                    if ($key !== null && !is_callable($key)) {
+                        throw new PyHPTypeError("sorted(): 'key' must be callable, got " . pyhp_type_name($key));
+                    }
+                    break;
+                case 'reverse':
+                    if ($reverse) throw new PyHPTypeError("sorted() got multiple values for argument 'reverse'");
+                    $reverse = pyhp_truthy($kw['value']);
+                    break;
+                default:
+                    throw new PyHPTypeError("sorted() got an unexpected keyword argument '{$kw['name']}'");
+            }
+        }
+        return pyhp_sorted_impl($args[0], $key, $reverse);
+    }
     $reg = pyhp_builtins();
     if (!isset($reg[$name])) throw new PyHPError("undefined function '{$name}'");
     [$fn, $min, $max] = $reg[$name];
     pyhp_reg_errcheck($args, $name, $min, $max);
     return $fn(...$args);
+}
+
+/** sorted() implementation shared by the plain and key=/reverse= forms. */
+function pyhp_sorted_impl($iterable, $key, bool $reverse) {
+    $vals = pyhp_iter_values($iterable);
+    if ($key !== null) {
+        // decorate-sort-undecorate (PHP 8 usort is stable, like Python's sort)
+        $decorated = [];
+        foreach ($vals as $v) { $decorated[] = [pyhp_callfunc($key, [$v], 'sorted(): key'), $v]; }
+        usort($decorated, fn($x, $y) => $reverse ? pyhp_compare($y[0], $x[0]) : pyhp_compare($x[0], $y[0]));
+        return new PyList(array_map(fn($d) => $d[1], $decorated));
+    }
+    usort($vals, fn($x, $y) => $reverse ? pyhp_compare($y, $x) : pyhp_compare($x, $y));
+    return new PyList($vals);
+}
+
+/* ---------------- keyword-argument binding (shared by the transpiler's
+   kwargs calls; mirrors the interpreter's bind order and error messages) ---- */
+
+/** Merge positional + keyword args into a dense positional list. Slots the
+ *  program skipped become PyHPMissing placeholders; the callee's prologue
+ *  treats them as "not passed" (default or missing-argument error). */
+function pyhp_kw_slots(array $paramNames, bool $hasVariadic, array $pos, array $kw, string $label): array {
+    $n = count($paramNames);
+    $slots = array_fill(0, $n, false);
+    $values = array_fill(0, $n, null);
+    $extra = [];
+    $given = count($pos);
+    for ($i = 0; $i < $given; $i++) {
+        if ($i < $n) { $slots[$i] = true; $values[$i] = $pos[$i]; }
+        elseif ($hasVariadic) { $extra[] = $pos[$i]; }
+        else { throw new PyHPTypeError("{$label}() takes {$n} argument(s), {$given} given"); }
+    }
+    foreach ($kw as $entry) {
+        $idx = array_search($entry['name'], $paramNames, true);
+        if ($idx === false) {
+            throw new PyHPTypeError("{$label}() got an unexpected keyword argument '{$entry['name']}'");
+        }
+        if ($slots[$idx]) {
+            throw new PyHPTypeError("{$label}() got multiple values for argument '{$entry['name']}'");
+        }
+        $slots[$idx] = true;
+        $values[$idx] = $entry['value'];
+    }
+    $last = $hasVariadic && $n > 0 ? $n - 1 : -1;
+    for ($i = $n - 1; $i >= 0; $i--) { if ($slots[$i]) { $last = $i; break; } }
+    $ordered = [];
+    for ($i = 0; $i <= $last; $i++) { $ordered[] = $slots[$i] ? $values[$i] : PyHPMissing::get(); }
+    foreach ($extra as $x) { $ordered[] = $x; }
+    return $ordered;
+}
+
+function pyhp_call_kw($c, array $pos, array $kw, string $label) {
+    if (!is_callable($c)) {
+        throw new PyHPTypeError("'{$label}' is not callable (" . pyhp_type_name($c) . ")");
+    }
+    try { $ref = new ReflectionFunction($c); }
+    catch (ReflectionException) { throw new PyHPTypeError("'{$label}' is not reflectable"); }
+    $names = []; $variadic = false;
+    foreach ($ref->getParameters() as $p) {
+        if ($p->isVariadic()) { $variadic = true; break; }
+        $names[] = $p->getName();
+    }
+    return $ref->invokeArgs(pyhp_kw_slots($names, $variadic, $pos, $kw, $label));
+}
+
+function pyhp_call_kw_method(object $obj, string $method, array $pos, array $kw, string $label) {
+    try { $ref = new ReflectionMethod($obj, $method); }
+    catch (ReflectionException) { throw new PyHPError("{$label}(): no method '{$method}'"); }
+    $names = []; $variadic = false;
+    foreach ($ref->getParameters() as $p) {
+        if ($p->isVariadic()) { $variadic = true; break; }
+        $names[] = $p->getName();
+    }
+    return $ref->invokeArgs($obj, pyhp_kw_slots($names, $variadic, $pos, $kw, $label));
+}
+
+function pyhp_call_kw_parent(object $obj, string $method, array $pos, array $kw, string $label) {
+    $parent = get_parent_class($obj);
+    if ($parent === false) throw new PyHPError("{$label}(): no parent class");
+    try { $ref = new ReflectionMethod($parent, $method); }
+    catch (ReflectionException) { throw new PyHPError("{$label}(): parent class has no method '{$method}'"); }
+    $names = []; $variadic = false;
+    foreach ($ref->getParameters() as $p) {
+        if ($p->isVariadic()) { $variadic = true; break; }
+        $names[] = $p->getName();
+    }
+    return $ref->invokeArgs($obj, pyhp_kw_slots($names, $variadic, $pos, $kw, $label));
+}
+
+function pyhp_new_kw(string $cls, array $pos, array $kw, string $label) {
+    if (!class_exists($cls)) throw new PyHPError("unknown class '{$cls}'");
+    $rc = new ReflectionClass($cls);
+    $ctor = $rc->getConstructor();
+    if ($ctor === null) {
+        if (count($kw) > 0 || count($pos) > 0) throw new PyHPTypeError("{$label}() takes no arguments");
+        return $rc->newInstance();
+    }
+    $names = []; $variadic = false;
+    foreach ($ctor->getParameters() as $p) {
+        if ($p->isVariadic()) { $variadic = true; break; }
+        $names[] = $p->getName();
+    }
+    return $rc->newInstanceArgs(pyhp_kw_slots($names, $variadic, $pos, $kw, $label));
 }
 
 function pyhp_builtin_exists(string $name): bool {
@@ -1393,7 +1556,10 @@ class PyHPCppNative
         return self::$exports;
     }
 
-    public static function call(string $name, array $args) {
+    public static function call(string $name, array $args, array $kwargs = []) {
+        if (count($kwargs) > 0) {
+            throw new PyHPTypeError("native cpp exports accept positional arguments only ('{$name}()')");
+        }
         $f = self::fn($name);
         return $f(...$args);
     }

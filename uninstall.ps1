@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Default install dir is this script's own folder; if that does not look
-  like a PyHP folder, the default %LOCALAPPDATA%\Programs\PyHP is used.
+  like a PyHP folder, the default C:\phpl is used.
 
     powershell -NoProfile -ExecutionPolicy Bypass -File .\uninstall.ps1
     uninstall.bat                 (same, double-click friendly)
@@ -24,7 +24,7 @@ if (-not $InstallDir) {
         $InstallDir = $PSScriptRoot
     }
     else {
-        $InstallDir = Join-Path $env:LOCALAPPDATA 'Programs\PyHP'
+        $InstallDir = 'C:\phpl'
     }
 }
 

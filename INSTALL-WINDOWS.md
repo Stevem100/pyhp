@@ -32,13 +32,28 @@ curl -fsSL https://raw.githubusercontent.com/Stevem100/pyhp/main/install.ps1 -o 
 
 ### What the installer does
 
-- Installs PyHP to `%LOCALAPPDATA%\Programs\PyHP` (no admin rights needed).
+- Installs PyHP to **`C:\phpl`** (change the location with `-InstallDir`; if
+  Windows denies writing to `C:\` the installer tells you exactly how to fix
+  it — run the terminal once as Administrator, or pick a per-user folder).
 - **PHP handling is automatic** — it reuses PHP if you already have it (PATH,
   `PHP_BIN`, or a previous install); otherwise it downloads PHP 8.3 NTS x64
   (~34 MB, once) **into the PyHP folder**, so PyHP is fully self-contained and
   never conflicts with any other PHP on your system.
 - Adds the PyHP folder to your **user PATH**, so `pyhp` works in every new terminal.
 - Runs a smoke test and prints next steps.
+
+### Upgrading from PyHP 0.1.x–0.3.x
+
+`pyhp update` only exists from **0.4.0** on — on older installs it prints
+`unknown command 'update'` and the banner still says `PyHP 0.1.0`. The fix is
+a single step: **re-run the installer above** (it installs the current version
+into `C:\phpl` and adds it to your user PATH). From then on the installed copy
+updates itself with `pyhp update` — no more reinstalling.
+
+If typing `pyhp` still shows the old banner or `Press any key to continue`, an
+old install folder is still winning the PATH race: run the `uninstall.ps1`/
+`uninstall.bat` from **that** folder (or just delete the old folder), reopen
+your terminal, and `pyhp version` will show the new one.
 
 ### Installer parameters (optional)
 
@@ -109,7 +124,7 @@ Locate the existing `php.exe`, e.g. `C:\xampp\php\php.exe`, and do **one** of:
 
 ## Step 2 — Install PyHP
 
-1. Download `pyhp-0.1.0.zip`.
+1. Download `pyhp-0.5.0.zip` (from the repo's **Releases** page).
 2. Right-click it → **Extract All…** and extract to `C:\`
    (the zip contains a `pyhp\` folder). You end up with:
 
@@ -120,8 +135,9 @@ C:\pyhp\
 ├── README.md             ← language tour + reference
 ├── bin\pyhp              ← the language CLI (started by PHP)
 ├── src\…                 ← lexer, parser, interpreter, transpiler, runtime
-├── examples\*.pyh        ← 5 runnable examples
-└── tests\run_tests.php   ← 26-case test suite
+├── docs\REFERENCE.md     ← the full language reference
+├── examples\*.pyh        ← 10 runnable examples
+└── tests\run_tests.php   ← 37-case test suite
 ```
 
 > Tip: avoid extracting into a path containing spaces or non-ASCII characters.
@@ -149,7 +165,7 @@ or use the plain-PHP form `php bin\pyhp run examples\01_hello.pyh`.
 
 ```
 C:\pyhp> pyhp repl
-PyHP 0.1.0 interactive shell — PHP syntax, Python brains, C muscles.
+PyHP 0.5.0 interactive shell — PHP syntax, Python brains, C muscles.
 pyhp> x = 5
 pyhp> [n ** 2 for n in range(x)]
 => [0, 1, 4, 9, 16]
@@ -160,9 +176,10 @@ pyhp> :quit
 
 ## Step 4 (optional) — Make `pyhp` available everywhere
 
-Add `C:\pyhp` to your PATH, using the same GUI steps as in Option B, step 4.
-Keep `pyhp.bat` in the same folder as `bin\` — the launcher resolves the
-language files relative to its own location.
+Add `C:\pyhp` (or wherever you extracted) to your PATH, using the same GUI
+steps as in Option B, step 4. Keep `pyhp.bat` in the same folder as `bin\` —
+the launcher resolves the language files relative to its own location. (The
+installer does this automatically and adds `C:\phpl` for you.)
 
 New terminals will now accept `pyhp …` from any directory.
 
@@ -175,7 +192,7 @@ cd C:\pyhp
 php tests\run_tests.php
 ```
 
-Expected result: **26/26 PASS** — every test runs on *both* engines
+Expected result: **37/37 PASS** — every test runs on *both* engines
 (built-in interpreter and transpiled fast path) and must produce
 byte-identical output on each.
 
@@ -192,6 +209,9 @@ byte-identical output on each.
   *More info* → *Run anyway*.
 - **PowerShell execution policy** does not affect PyHP: `pyhp.bat` is a plain
   batch file, not a PowerShell script.
+- **`pyhp update` keeps the install current** — run it inside any installed
+  PyHP (from 0.4.0 on) and it refreshes the folder it lives in, preserving a
+  bundled PHP. Install location (e.g. `C:\phpl`) never changes.
 - **`php bin\pyhp …` works everywhere** — the launcher is pure convenience;
   every command in README.md also works in the `php bin\pyhp` form.
 
@@ -203,7 +223,9 @@ byte-identical output on each.
 | --- | --- |
 | `'php' is not recognized` | PHP is not on PATH yet — install per Step 1, then **reopen** the terminal. Already have PHP? Use `setx PHP_BIN "C:\path\to\php.exe"`. |
 | `unexpected token 'match'` or similar parse errors from PHP | An old PHP (7.x) is answering first. Run `where php` to see which one; uninstall/deprioritize it or set `PHP_BIN` to the 8.x `php.exe`. |
-| `'pyhp' is not recognized` | `cd C:\pyhp` first; in PowerShell use `.\pyhp.bat`; or add `C:\pyhp` to PATH (Step 4). |
-| `PyHP: cannot find script '...'` | Give the full path (`pyhp run C:\pyhp\examples\01_hello.pyh`) or `cd` into `C:\pyhp`. Use backslashes or quotes for paths with spaces. |
+| `'pyhp' is not recognized` | `cd C:\phpl` first; in PowerShell use `.\pyhp.bat`; or add the install folder to PATH (Step 4). |
+| `pyhp version` shows an old version (e.g. 0.1.0) | An old install folder is first on PATH. Delete it (or run its `uninstall.bat`), reopen the terminal. |
+| `unknown command 'update'` | Your install predates 0.4.0 — re-run the current `install.ps1` once; `pyhp update` works from then on. |
+| `PyHP: cannot find script '...'` | Give the full path (`pyhp run C:\phpl\examples\01_hello.pyh`) or `cd` into the install folder. Use backslashes or quotes for paths with spaces. |
 | REPL prompt does not echo while typing | Normal on stock Windows PHP (no readline extension) — your input is still received; press Enter to submit. |
 | Window flashes and closes | You double-clicked `pyhp.bat`. Run it from a terminal instead (Step 3); double-click without arguments now pauses so you can read the usage text. |

@@ -571,13 +571,13 @@ class PyHPTranspiler
             }
             if ($p['def'] !== null) {
                 $def = $this->emitExpr($p['def']);
-                $this->w($L, "if (func_num_args() <= {$i}) {");
+                $this->w($L, "if (func_num_args() <= {$i} || \\PyHPMissing::is(\${$p['name']})) {");
                 $this->indent++;
                 $this->w($L, $this->typedWrap("\${$p['name']}", $def, $p['type'], $p['name']));
                 $this->indent--;
                 $this->w($L, '}');
             } else {
-                $this->w($L, "if (func_num_args() <= {$i}) {");
+                $this->w($L, "if (func_num_args() <= {$i} || \\PyHPMissing::is(\${$p['name']})) {");
                 $this->indent++;
                 $this->w($L, "throw new PyHPTypeError(\"{$fnLabel}() missing required argument '{$p['name']}'\");");
                 $this->indent--;
@@ -1032,45 +1032,85 @@ class PyHPTranspiler
 
     private function emitCall(array $e): string {
         $callee = $e['callee'];
+        $kws = $e['kwargs'] ?? [];
+        $posList = '[' . $this->emitCallArgs($e['args']) . ']';
+        $kwList = '[' . implode(', ', array_map(
+            fn($kw) => "['name' => " . var_export($kw['name'], true) . ", 'value' => " . $this->emitExpr($kw['expr']) . ']',
+            $kws)) . ']';
         if ($callee['k'] === 'Super') {
+            if (count($kws) > 0) {
+                return "pyhp_call_kw_parent(\$this, '__construct', {$posList}, {$kwList}, '__construct')";
+            }
             return 'parent::__construct(' . $this->emitCallArgs($e['args']) . ')';
         }
         if ($callee['k'] === 'Member' && $callee['obj']['k'] === 'Super') {
+            if (count($kws) > 0) {
+                return 'pyhp_call_kw_parent($this, ' . var_export($callee['name'], true) . ", {$posList}, {$kwList}, " . var_export($callee['name'], true) . ')';
+            }
             return 'parent::' . $callee['name'] . '(' . $this->emitCallArgs($e['args']) . ')';
         }
         if ($callee['k'] === 'Member' && $callee['obj']['k'] === 'This') {
+            if (count($kws) > 0) {
+                return 'pyhp_call_kw_method($this, ' . var_export($callee['name'], true) . ", {$posList}, {$kwList}, " . var_export($callee['name'], true) . ')';
+            }
             return '$this->' . $callee['name'] . '(' . $this->emitCallArgs($e['args']) . ')';
         }
         if ($callee['k'] === 'Member') {
             $obj = $this->emitExpr($callee['obj']);
-            return "pyhp_call_method({$obj}, " . var_export($callee['name'], true) . ', [' . $this->emitCallArgs($e['args']) . '])';
+            // pyhp_call_method binds kwargs via reflection for transpiled user
+            // classes; plain positional calls keep the fast path
+            return "pyhp_call_method({$obj}, " . var_export($callee['name'], true) . ", {$posList}, {$kwList})";
         }
         if ($callee['k'] === 'Var') {
             $name = $callee['name'];
             $scope = $this->curScope();
             $map = pyhp_error_class_map();
             if (in_array($name, $scope['assigned'], true)) {
+                if (count($kws) > 0) {
+                    return "pyhp_call_kw(\${$name}, {$posList}, {$kwList}, " . var_export($name, true) . ')';
+                }
                 return "pyhp_callfunc(\${$name}, [" . $this->emitCallArgs($e['args']) . "], " . var_export($name, true) . ')';
             }
             if ($name === 'require') {
                 return $this->emitRequire($e);
             }
             if ($this->funcKnown($name)) {
+                if (count($kws) > 0) {
+                    return 'pyhp_call_kw(' . var_export($this->fnPhp($name), true) . ", {$posList}, {$kwList}, " . var_export($name, true) . ')';
+                }
                 return $this->fnPhp($name) . '(' . $this->emitCallArgs($e['args']) . ')';
             }
             if ($this->clsKnown($name)) {
+                if (count($kws) > 0) {
+                    return 'pyhp_new_kw(' . var_export($this->clsPhp($name), true) . ", {$posList}, {$kwList}, " . var_export($name, true) . ')';
+                }
                 return 'new ' . $this->clsPhp($name) . '(' . $this->emitCallArgs($e['args']) . ')';
             }
             if (isset($this->cppExports[$name])) {
+                if (count($kws) > 0) {
+                    throw new PyHPSyntaxError("line {$e['line']}: native cpp exports accept positional arguments only");
+                }
                 return "pyhp_cpp_call(" . var_export($name, true) . ', [' . $this->emitCallArgs($e['args']) . '])';
             }
             if (isset($map[$name])) {
+                if (count($kws) > 0) {
+                    throw new PyHPSyntaxError("line {$e['line']}: error classes accept positional arguments only");
+                }
                 return 'new ' . $map[$name] . '(' . $this->emitCallArgs($e['args']) . ')';
             }
             if (pyhp_builtin_exists($name)) {
+                if (count($kws) > 0) {
+                    return 'pyhp_call_builtin(' . var_export($name, true) . ", {$posList}, {$kwList})";
+                }
                 return "pyhp_fn_call(" . var_export($name, true) . ', ' . $this->emitCallArgs($e['args']) . ')';
             }
+            if (count($kws) > 0) {
+                return "pyhp_call_kw(\${$name}, {$posList}, {$kwList}, " . var_export($name, true) . ')';
+            }
             return "pyhp_callfunc(\${$name}, [" . $this->emitCallArgs($e['args']) . "], " . var_export($name, true) . ')';
+        }
+        if (count($kws) > 0) {
+            return 'pyhp_call_kw(' . $this->emitExpr($callee) . ", {$posList}, {$kwList}, '<expression>')";
         }
         return 'pyhp_callfunc(' . $this->emitExpr($callee) . ', [' . $this->emitCallArgs($e['args']) . "], '<expression>')";
     }
