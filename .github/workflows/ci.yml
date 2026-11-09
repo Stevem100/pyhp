@@ -87,7 +87,11 @@ jobs:
         run: |
           ./install.ps1 -InstallDir "$env:RUNNER_TEMP\pyhp-inst" -NoPath
           & "$env:RUNNER_TEMP\pyhp-inst\pyhp.bat" version
-          & "$env:RUNNER_TEMP\pyhp-inst\pyhp.bat" run examples/01_hello.pyh | Select-Object -First 3
+          if ($LASTEXITCODE -ne 0) { throw "pyhp version failed (exit $LASTEXITCODE)" }
+          $hello = (& "$env:RUNNER_TEMP\pyhp-inst\pyhp.bat" run examples/01_hello.pyh 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "pyhp run failed (exit $LASTEXITCODE)" }
+          if ($hello -notmatch 'Hello from PyHP') { throw "unexpected hello output: $hello" }
+          Write-Host "pyhp.bat version + run OK"
 
       - name: pyhp update reports up to date (installed copy self-checks)
         shell: pwsh

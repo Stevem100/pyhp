@@ -11,7 +11,7 @@ rem    pyhp repl                              interactive shell
 rem    pyhp version [--check]                 version info (--check: latest on GitHub)
 rem    pyhp update [--force] [--main]         self-update from GitHub releases
 rem
-rem  PHP lookup order:
+rem  PHP lookup order - each step falls back to the next if unusable:
 rem    1. PHP_BIN environment variable (php.exe path or its folder)
 rem    2. bundled copy from install.ps1  (<this folder>\php\php.exe)
 rem    3. php.exe on PATH
@@ -20,26 +20,25 @@ rem ------------------------------------------------------------------
 set "PYHP_HOME=%~dp0"
 set "PHP_EXE=%PHP_BIN%"
 
-if defined PHP_EXE goto resolve_php
-if exist "%PYHP_HOME%php\php.exe" set "PHP_EXE=%PYHP_HOME%php\php.exe"
-if defined PHP_EXE goto check_php
-goto find_php
+if not defined PHP_EXE goto find_bundled
 
-:resolve_php
+rem PHP_BIN may name php.exe directly or the folder that contains it
 if exist "%PHP_EXE%\*" set "PHP_EXE=%PHP_EXE%\php.exe"
-goto check_php
+if exist "%PHP_EXE%" goto run
+echo [pyhp] PHP_BIN is set but does not point at php.exe: "%PHP_BIN%" 1>&2
+echo [pyhp] Falling back to the bundled or PATH copy instead. 1>&2
 
-:find_php
+:find_bundled
+if exist "%PYHP_HOME%php\php.exe" (
+    set "PHP_EXE=%PYHP_HOME%php\php.exe"
+    goto run
+)
+
+:find_path
 where php >nul 2>nul
 if errorlevel 1 goto no_php
 set "PHP_EXE=php"
-goto check_php
-
-:check_php
-if exist "%PHP_EXE%" goto run
-echo [pyhp] PHP_BIN is set but php.exe was not found: "%PHP_EXE%" 1>&2
-echo [pyhp] Point PHP_BIN at php.exe, e.g.  setx PHP_BIN "C:\php\php.exe" 1>&2
-exit /b 1
+goto run
 
 :no_php
 echo [pyhp] PHP 8.0+ was not found on this computer. 1>&2

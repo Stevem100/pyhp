@@ -32,6 +32,10 @@
 - `pyhp update` updates the folder the running install lives in — for the new
   default that means `C:\phpl` in place, preserving a bundled `php\` and any
   `vendor\` packages. `uninstall.ps1` knows the new default too.
+- `pyhp.bat` falls back to the bundled or PATH copy of PHP when `PHP_BIN` is
+  set but unusable (for example a bare `php` left in the environment by other
+  tooling) — a wrong `PHP_BIN` no longer breaks every launcher call, matching
+  the documented lookup order. Found by the new Windows CI smoke job.
 - INSTALL-WINDOWS.md gained an **"Upgrading from PyHP 0.1.x–0.3.x"** section
   (re-run the installer once; from then on `pyhp update` suffices) and current
   counts, layout and troubleshooting rows.
