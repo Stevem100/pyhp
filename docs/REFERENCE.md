@@ -485,7 +485,7 @@ Callables stored in a dict are also dot-callable: `ops = {"twice": lambda s: s +
 
 ## 17. Engine parity
 
-The test suite (`php tests/run_tests.php`, 46 cases) executes every program on
+The test suite (`php tests/run_tests.php`, 49 cases) executes every program on
 tree-walking interpreter, bytecode VM and transpiler (plus the native backend
 where g++ exists) and requires byte-identical output. The only known
 divergences:
