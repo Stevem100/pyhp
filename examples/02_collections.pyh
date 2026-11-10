@@ -47,10 +47,10 @@ print("expensive:", expensive);
 
 // rich builtins + higher-order functions with lambdas
 print("sum:", sum(squares), " min:", min(squares), " max:", max(squares));
-print("map:", map(lambda x: x + 1, [1, 2, 3]));
+print("map:", list(map(lambda x: x + 1, [1, 2, 3])));
 print("filter:", filter(lambda x: x > 3, squares));
 print("zip:", zip(["a", "b", "c"], [1, 2, 3]));
-print("enumerate:", enumerate(["x", "y"]));
+print("enumerate:", list(enumerate(["x", "y"])));
 print("sorted desc:", sorted([5, 2, 9, 1])[::-1]);
 print("sorted by len:", sorted(["pear", "fig", "banana"], key = lambda w: len(w)));
 print("sorted rev:", sorted([5, 2, 9, 1], reverse = true));

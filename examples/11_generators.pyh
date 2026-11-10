@@ -1,0 +1,38 @@
+/* Generators & lazy views — PyHP 0.7.0
+   Run: pyhp run examples/11_generators.pyh */
+
+// 1. A generator function: nothing runs until you iterate.
+function countdown(n) {
+    print("start");
+    while n > 0 { yield n; n -= 1; }
+    print("done");
+}
+g = countdown(3);
+print("created", g);
+print(next(g), next(g));
+foreach x in g { print("tick", x); }
+try { next(g); } catch (StopIteration e) { print("exhausted"); }
+
+// 2. Infinite streams are fine — take what you need, then break.
+function naturals(from = 0) {
+    int k = from;
+    while true { yield k; k += 1; }
+}
+squares = map(lambda v: v * v, naturals(1));   // lazy view over a lazy generator
+first = [];
+foreach v in squares { first.append(v); if len(first) == 6 { break; } }
+print("first six squares:", first);
+
+// 3. Big lazy range — costs nothing until iterated.
+r = range(0, 2 ** 70);
+print(r);
+total = 0;
+foreach v in range(2 ** 68, 2 ** 68 + 5) { total += v; }
+print("big range slice sum:", total);
+
+// 4. Generators compose: pipeline of views.
+evens = filter(lambda v: v % 2 == 0, naturals(0));
+thirds = map(lambda v: v / 3, evens);
+pick = [];
+foreach v in thirds { pick.append(v); if len(pick) == 4 { break; } }
+print("even -> /3:", pick);

@@ -1,14 +1,19 @@
 {
     "language": "PyHP",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "tagline": "PHP syntax, Python brains, C muscles.",
     "fileExtension": ".pyh",
     "runtime": "PHP 8.0+ CLI, no extensions",
     "engines": {
-        "interpreter": "tree-walking AST evaluator (pyhp run / pyhp repl)",
+        "interpreter": "bytecode VM (pyhp run) + tree-walking AST evaluator (pyhp run --tree / pyhp repl)",
         "transpiler": "PyHP -> standalone PHP 8 (pyhp build / pyhp compile)",
         "nativeCpp": "PyHP -> single-file C++17 -> machine code (pyhp build --target cpp|native)",
-        "parity": "the 37-case test suite asserts byte-identical output across engines"
+        "parity": "the 46-case test suite asserts byte-identical output across tree-walker, bytecode VM and transpiler (plus the native backend where g++ exists)",
+        "vm": "pyhp run executes a stack-based bytecode VM by default; pyhp run --tree forces the classic tree-walking interpreter (identical output; the REPL is tree-based)",
+        "lazyViews": "range/map/filter/zip/enumerate/reversed return lazy single-use views (Python semantics); list(v) materializes; range supports big-int bounds, indexing, slicing and computed in; reprs: range(0, 5), <map object>, <generator object name>",
+        "generators": "yield turns any function/lambda/method into a generator (body runs lazily, arguments bind eagerly at call time); next(it, default) advances any iterator and raises StopIteration or returns the default; native backend rejects yield with a clear error",
+        "bigInt": "int arithmetic that overflows 64-bit promotes to exact arbitrary-precision ints and huge literals parse exactly; / past float range raises OverflowError; % uses Python floor-mod rules; bitwise ops on big values need the gmp extension",
+        "langs": "pyhp langs [python|php|cpp|js|full] prints an offline syntax/function bridge to other languages (same tables as docs/BRIDGE.md) — no other runtime required"
     },
     "nativeCpp": {
         "cppBlocks": "cpp { ... } embeds C++17 in a .pyh file; functions declared with `// pyhp-export: <C decl>;` become callable from PyHP",
@@ -16,20 +21,22 @@
             "int64_t",
             "double",
             "const char*",
-            "void"
+            "void",
+            "pyhp_list",
+            "pyhp_dict"
         ],
         "exportExample": "// pyhp-export: double pyh_hypot(double a, double b);",
         "bridgeModes": "PHP ext/ffi when available, else a compiled helper binary driven over a tiny line protocol (needs only g++)",
         "cache": "./.pyhp_native/ (override with PYHP_NATIVE_CACHE, compiler with CXX)",
         "nativeBackend": "pyhp build --target cpp -o app.cpp emits C++17; --target native -o app also compiles with g++",
-        "nativeSupports": "full value model, operators, methods, slicing, f-strings, comprehensions, top-level functions, foreach/while/for, try/catch/throw, require() of modules and stdlib, cpp blocks, sha256, json, base64/url builtins",
+        "nativeSupports": "full value model, operators, methods, slicing, f-strings, comprehensions, top-level functions, classes (ctor kwargs, super, __str__, isinstance, iterator protocol), foreach/while/for, try/catch/throw, require() of modules and stdlib, cpp blocks, sha256, json, base64/url builtins, pyhp_list/pyhp_dict bridge types",
         "nativeNotYet": [
-            "classes & super",
-            "lambda/function expressions",
+            "generators (yield) and lazy views (stay eager lists)",
             "try/finally",
             "md5/crc32",
             "exec/system/env/sleep/input/malloc_arena",
-            "isinstance of classes"
+            "big-int values (int64 only)",
+            "extends SomeVar (variable-held parent classes)"
         ],
         "rules": [
             "export names are global — prefix them (pyh_mymod_fn)",
@@ -188,6 +195,7 @@
         "ZeroDivisionError",
         "MemError",
         "RuntimeError",
+        "OverflowError",
         "StopIteration"
     ],
     "modules": {
@@ -359,6 +367,11 @@
             "name": "reversed",
             "minArgs": 1,
             "maxArgs": 1
+        },
+        {
+            "name": "next",
+            "minArgs": 1,
+            "maxArgs": 2
         },
         {
             "name": "sum",

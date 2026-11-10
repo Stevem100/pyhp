@@ -12,9 +12,10 @@
  *
  * v1 limitations (documented in docs/REFERENCE.md):
  *   - lambdas capture enclosing values at creation (early binding);
- *     classes are not supported yet
- *   - try/finally is not supported yet (try/catch is)
+ *     the PHP engines keep late binding
+ *   - generators (yield) and try/finally are not supported yet (try/catch is)
  *   - a few host builtins (md5, sha256, ...) are unavailable
+ *   - classes use a flat registry namespace (one program = one namespace)
  */
 
 require_once __DIR__ . '/runtime.php';
@@ -34,7 +35,7 @@ class PyHPCppTranspiler
         'print', 'println', 'repr', 'len', 'range', 'map', 'filter', 'zip', 'enumerate',
         'sorted', 'reversed', 'sum', 'any', 'all', 'keys', 'values', 'items',
         'list', 'dict', 'abs', 'min', 'max', 'floor', 'ceil', 'round', 'sqrt', 'pow',
-        'int', 'float', 'str', 'bool', 'type', 'chr', 'ord', 'hex', 'bin',
+        'int', 'float', 'str', 'bool', 'type', 'isinstance', 'chr', 'ord', 'hex', 'bin',
         'json_parse', 'json_string', 'base64e', 'base64d', 'urlenc', 'urldec', 'sha256',
         'file_read', 'file_write', 'file_append', 'file_exists', 'argv', 'exit', 'time',
     ];
@@ -131,7 +132,7 @@ class PyHPCppTranspiler
                     $this->modUnits[$this->curUnit]['funcs'][$s['name']] = true;
                     break;
                 case 'Class':
-                    $this->err('classes are not supported by the native backend yet — use the PHP engines (pyhp build --target php)', $s['line']);
+                    $this->collectNativeClass($s);
                     break;
                 case 'If':
                     foreach ($s['branches'] as [$c, $b]) { $this->collectStmts($b['stmts']); }
@@ -233,6 +234,9 @@ class PyHPCppTranspiler
                 $this->collectExpr($e['target']);
                 $this->collectExpr($e['value']);
                 break;
+            case 'Yield':
+                if ($e['e'] !== null) $this->collectExpr($e['e']);
+                break;
             case 'Func':
                 foreach ($e['params'] as $p) {
                     if (($p['def'] ?? null) !== null) $this->collectExpr($p['def']);
@@ -242,6 +246,19 @@ class PyHPCppTranspiler
             case 'Var': case 'Num': case 'Str': case 'Bool': case 'Null': case 'This': case 'Super':
                 break;
         }
+    }
+
+    /** Collect a native class definition (methods/defaults emitted later). */
+    private function collectNativeClass(array $s): void {
+        $unit = $this->curUnit;
+        foreach ($s['members'] as $m) {
+            if ($m['k'] === 'Func' && pyhp_ast_has_yield($m['body']['stmts'])) {
+                $this->err("generator methods (yield) are not supported by the native backend — use the PHP engines", $m['line']);
+            }
+        }
+        $this->modUnits[$unit]['classList'][] = $s;
+        $this->modUnits[$unit]['classes'][$s['name']] = true;
+        $this->modUnits[$unit]['assigned'][$s['name']] = true;   // class name usable as a call target
     }
 
     private function collectRequire(string $spec, int $line): void {
@@ -355,17 +372,20 @@ class PyHPCppTranspiler
             $conv = [];
             $call = [];
             $listIdx = [];
+            $dictIdx = [];
             for ($i = 0; $i < count($kinds); $i++) {
                 switch ($kinds[$i]) {
                     case 'i': $conv[] = "    int64_t a{$i} = pyhp_rt_to_i(A[{$i}], {$this->cppStr($name)});"; break;
                     case 'd': $conv[] = "    double a{$i} = pyhp_rt_to_d(A[{$i}], {$this->cppStr($name)});"; break;
                     case 's': $conv[] = "    std::string ss{$i} = pyhp_rt_to_s(A[{$i}], {$this->cppStr($name)});"; break;
                     case 'l': $conv[] = "    pyhp_list a{$i} = pyhp_val_to_list(A[{$i}], " . $this->cppStr($name) . ");"; $listIdx[] = $i; break;
+                    case 'm': $conv[] = "    pyhp_dict a{$i} = pyhp_val_to_dict(A[{$i}], " . $this->cppStr($name) . ");"; $dictIdx[] = $i; break;
                 }
                 $call[] = $kinds[$i] === 's' ? "ss{$i}.c_str()" : "a{$i}";
             }
             $callStr = implode(', ', $call);
-            $freeLines = implode('', array_map(fn($i) => "    pyhp_list_free(&a{$i});\n", $listIdx));
+            $freeLines = implode('', array_map(fn($i) => "    pyhp_list_free(&a{$i});\n", $listIdx))
+                . implode('', array_map(fn($i) => "    pyhp_dict_free(&a{$i});\n", $dictIdx));
             $L[] = '    if (name == ' . $this->cppStr($name) . ') {';
             if (count($kinds) > 0) {
                 $L[] = '        if (A.size() != ' . count($kinds) . ') pyhp_rt_throw("TypeError", std::string(' . $this->cppStr($name) . ') + "() wrong number of arguments");';
@@ -376,6 +396,7 @@ class PyHPCppTranspiler
                 case 'd': $L[] = "        double __r = {$name}({$callStr});\n{$freeLines}        return Val::mk(__r);"; break;
                 case 's': $L[] = "        { const char* __r = {$name}({$callStr}); std::string __s(__r ? __r : \"\"); {$freeLines} return Val::mk(__s); }"; break;
                 case 'l': $L[] = "        { pyhp_list __r = {$name}({$callStr}); Val __v = pyhp_list_to_val(__r); pyhp_list_free(&__r); {$freeLines} return __v; }"; break;
+                case 'm': $L[] = "        { pyhp_dict __r = {$name}({$callStr}); Val __v = pyhp_dict_to_val(__r); pyhp_dict_free(&__r); {$freeLines} return __v; }"; break;
                 default:  $L[] = "        {$name}({$callStr});\n{$freeLines}        return Val::nul();";
             }
             $L[] = '    }';
@@ -415,7 +436,106 @@ class PyHPCppTranspiler
                 $L[] = '';
             }
         }
+        foreach (($u['classList'] ?? []) as $cls) {
+            $this->emitNativeClassFunctions($unit, $cls, $L);
+            $L[] = '';
+        }
         $this->curUnitEmit = $saved;
+    }
+
+    private function classKey(string $name): string {
+        return $name;   // flat registry namespace (documented native-backend rule)
+    }
+
+    private function classKnown(string $unit, string $name): bool {
+        return isset($this->modUnits[$unit]['classes'][$name]);
+    }
+
+    /** Does this unit's class extend Exception (or another error class)?
+     *  Used by `throw` to type the PyError with the class name. */
+    private function classExtendsError(string $unit, string $name): bool {
+        $cur = $name;
+        for ($i = 0; $i < 32; $i++) {
+            $cls = $this->modUnits[$unit]['classList'][$cur] ?? null;
+            if ($cls === null) {
+                foreach (($this->modUnits[$unit]['classList'] ?? []) as $c) {
+                    if ($c['name'] === $cur) { $cls = $c; break; }
+                }
+            }
+            if ($cls === null) return false;
+            $ext = $cls['ext'];
+            if ($ext === null) return false;
+            if (in_array($ext, ['Exception', 'TypeError', 'ValueError', 'KeyError', 'IndexError', 'ZeroDivisionError', 'MemError', 'RuntimeError', 'OverflowError', 'StopIteration'], true)) return true;
+            $cur = $ext;
+        }
+        return false;
+    }
+
+    /** Method + default-value functions for one native class (file scope). */
+    private function emitNativeClassFunctions(string $unit, array $s, array &$L): void {
+        $name = $s['name'];
+        $key = $this->classKey($name);
+        $g = $unit === 'main' ? 'pyhp_G' : 'pyhp_' . $unit;
+
+        // property default evaluator: pyhp_clsdef_<Class>(prop, scope)
+        $defaults = array_values(array_filter($s['members'], fn($m) => $m['k'] === 'VarDecl'));
+        $L[] = "static Val pyhp_clsdef_" . $this->cppIdent($name) . "(const std::string& __prop, PyScope& __e) {";
+        foreach ($defaults as $m) {
+            $v = $m['init'] !== null ? $this->emitExpr($m['init'], '__e') : 'Val::nul()';
+            $L[] = '    if (__prop == ' . $this->cppStr($m['name']) . ') { return ' . $v . '; }';
+        }
+        $L[] = '    return Val::nul();';
+        $L[] = '}';
+        $L[] = '';
+
+        foreach ($s['members'] as $m) {
+            if ($m['k'] !== 'Func') continue;
+            $label = $name . '.' . $m['name'];
+            $nNamed = 0;
+            $variadic = false;
+            foreach ($m['params'] as $p) { if ($p['variadic']) $variadic = true; else $nNamed++; }
+            $L[] = 'static Val pyhp_mth_' . $this->cppIdent($unit . '_' . $name . '_' . $m['name']) . '(std::vector<Val> __args) {';
+            $L[] = "    PyScope env(&{$g});";
+            $L[] = '    if (__args.empty()) pyhp_rt_throw("RuntimeError", "' . $label . '(): missing this");';
+            $L[] = '    env.declare("this", __args[0]);';
+            $savedParams = $this->curFnParams;
+            $this->curFnParams = [];
+            foreach ($m['params'] as $p) { $this->curFnParams[$p['name']] = true; }
+            $i = 0;
+            foreach ($m['params'] as $p) {
+                if ($p['variadic']) {
+                    $this->w($L, 1, 'env.declare(' . $this->cppStr($p['name']) . ', pyhp_rt_rest(__args, ' . ($nNamed + 1) . '));');
+                    break;
+                }
+                $slot = '__args[' . ($i + 1) . ']';
+                $have = "(__args.size() > " . ($i + 1) . " && !pyhp_rt_is_missing({$slot}))";
+                if ($p['def'] !== null) {
+                    $def = $this->emitExpr($p['def'], 'env');
+                    $v = "({$have}) ? {$slot} : {$def}";
+                } else {
+                    $L[] = '    if (!' . $have . ') pyhp_rt_throw("TypeError", ' . $this->cppStr("{$label}() missing required argument '{$p['name']}'") . ');';
+                    $v = $slot;
+                }
+                if ($p['type'] !== null && $p['type'] !== 'var') {
+                    $v = "pyhp_rt_checktype({$v}, " . $this->cppStr($p['type']) . ', ' . $this->cppStr($p['name']) . ')';
+                }
+                $this->w($L, 1, 'env.declare(' . $this->cppStr($p['name']) . ', ' . $v . ');');
+                $i++;
+            }
+            $this->curFnParams = $savedParams;
+            $this->emitClassMethodBody($unit, $name, $m, $L);
+            $L[] = '    return Val::nul();';
+            $L[] = '}';
+            $L[] = '';
+        }
+    }
+
+    /** Body of a native method (this/super machinery enabled). */
+    private function emitClassMethodBody(string $unit, string $clsName, array $m, array &$L): void {
+        $savedCls = $this->curCls;
+        $this->curCls = $clsName;
+        $this->emitStmts($m['body']['stmts'], 'env', $L, 1);
+        $this->curCls = $savedCls;
     }
 
     private function emitFunction(string $unit, array $s, array &$L): void {
@@ -596,12 +716,16 @@ class PyHPCppTranspiler
             }
             case 'Throw':
                 $e = $s['e'];
-                if ($e['k'] === 'Call' && $e['callee']['k'] === 'Var'
-                    && in_array($e['callee']['name'], ['Exception', 'TypeError', 'ValueError', 'KeyError', 'IndexError', 'ZeroDivisionError', 'MemError', 'RuntimeError'], true)
-                    && count($e['args']) <= 1) {
-                    $msg = count($e['args']) === 1 ? 'pyhp_rt_tostr(' . $this->emitExpr($e['args'][0], $sc) . ')' : '""';
-                    $this->w($L, $ind, 'pyhp_rt_throw(' . $this->cppStr($e['callee']['name']) . ', ' . $msg . ');');
-                    return;
+                if ($e['k'] === 'Call' && $e['callee']['k'] === 'Var' && count($e['args']) <= 1) {
+                    $cname = $e['callee']['name'];
+                    $builtinErrs = ['Exception', 'TypeError', 'ValueError', 'KeyError', 'IndexError', 'ZeroDivisionError', 'MemError', 'RuntimeError', 'OverflowError', 'StopIteration'];
+                    if (in_array($cname, $builtinErrs, true)
+                        || ($this->classKnown($this->curUnitEmit, $cname)
+                            && $this->classExtendsError($this->curUnitEmit, $cname))) {
+                        $msg = count($e['args']) === 1 ? 'pyhp_rt_tostr(' . $this->emitExpr($e['args'][0], $sc) . ')' : '""';
+                        $this->w($L, $ind, 'pyhp_rt_throw(' . $this->cppStr($cname) . ', ' . $msg . ');');
+                        return;
+                    }
                 }
                 $this->w($L, $ind, 'pyhp_rt_throw("RuntimeError", pyhp_rt_tostr(' . $this->emitExpr($e, $sc) . '));');
                 return;
@@ -629,9 +753,43 @@ class PyHPCppTranspiler
                 $this->collectExprs($s['body']['stmts']);
                 return;
             case 'Class':
-                $this->err('classes are not supported by the native backend yet — use the PHP engines', $s['line']);
+                $this->emitClassRegistration($s, $sc, $L, $ind);
+                return;
         }
         $this->err("unsupported statement '{$s['k']}'", $s['line']);
+    }
+
+    /** Class statement -> registry registration (runs where the statement sits,
+     *  exactly like the interpreter's declareClass). */
+    private function emitClassRegistration(array $s, string $sc, array &$L, int $ind): void {
+        $name = $s['name'];
+        $key = $this->classKey($name);
+        $parent = 'std::string()';
+        if ($s['ext'] !== null) {
+            if ($this->classKnown($this->curUnitEmit, $s['ext'])) {
+                $parent = 'std::string(' . $this->cppStr($this->classKey($s['ext'])) . ')';
+            } elseif (in_array($s['ext'], ['Exception', 'TypeError', 'ValueError', 'KeyError', 'IndexError', 'ZeroDivisionError', 'MemError', 'RuntimeError', 'OverflowError', 'StopIteration'], true)) {
+                $parent = 'std::string(' . $this->cppStr($s['ext']) . ')';
+            } else {
+                $this->err("extends by variable is not supported by the native backend — extend a class declared in the same file", $s['line']);
+            }
+        }
+        $this->w($L, $ind, "pyhp_rt_class_register({$this->cppStr($key)}, {$this->cppStr($name)}, {$parent});");
+        foreach ($s['members'] as $m) {
+            if ($m['k'] === 'VarDecl') {
+                $type = $m['type'] !== null && $m['type'] !== 'var' ? $this->cppStr($m['type']) : 'std::string()';
+                $hasInit = $m['init'] !== null ? 'true' : 'false';
+                $this->w($L, $ind, "pyhp_rt_class_prop({$this->cppStr($key)}, {$this->cppStr($m['name'])}, {$type}, {$hasInit});");
+            } elseif ($m['k'] === 'Func') {
+                $params = [];
+                $variadic = 'false';
+                foreach ($m['params'] as $p) { if (!$p['variadic']) $params[] = $this->cppStr($p['name']); else $variadic = 'true'; }
+                $plist = 'std::vector<std::string>{' . implode(', ', $params) . '}';
+                $fn = 'pyhp_mth_' . $this->cppIdent($this->curUnitEmit . '_' . $name . '_' . $m['name']);
+                $this->w($L, $ind, "pyhp_rt_class_method({$this->cppStr($key)}, {$this->cppStr($m['name'])}, PyFn({$fn}), {$plist}, {$variadic});");
+            }
+        }
+        $this->w($L, $ind, "pyhp_rt_class_default({$this->cppStr($key)}, pyhp_clsdef_" . $this->cppIdent($name) . ');');
     }
 
     /* ================================================================ */
@@ -649,6 +807,9 @@ class PyHPCppTranspiler
     private function emitExpr(array $e, string $sc): string {
         switch ($e['k']) {
             case 'Num':
+                if ($e['v'] instanceof PyBigInt) {
+                    $this->err("big-int literals like {$e['v']->dec} are not supported by the native backend (int64 only) — use the PHP engines", $e['line']);
+                }
                 return 'Val::mk(' . $this->cppNum($e['v']) . ')';
             case 'Str':
                 return 'Val::mk(std::string(' . $this->cppStr($e['v']) . '))';
@@ -674,8 +835,10 @@ class PyHPCppTranspiler
                 }
                 return "{$sc}.get(" . $this->cppStr($name) . ')';
             }
-            case 'This': case 'Super':
-                $this->err("'{$e['k']}' is only meaningful inside classes, which the native backend does not support yet", $e['line']);
+            case 'This':
+                return "{$sc}.get(\"this\")";
+            case 'Super':
+                $this->err("super is only meaningful behind super(...) or super.method(...)", $e['line']);
             case 'List':
                 return 'pyhp_rt_list({' . implode(', ', array_map(fn($i) => $this->emitExpr($i, $sc), $e['items'])) . '})';
             case 'Dict': {
@@ -711,7 +874,15 @@ class PyHPCppTranspiler
                 return 'pyhp_rt_slice(' . $this->emitExpr($e['obj'], $sc) . ", {$s}, {$t}, {$st})";
             }
             case 'Member':
+                if ($e['obj']['k'] === 'Super') {
+                    $this->err("super is only meaningful behind super.method(...)", $e['line']);
+                }
+                if ($e['obj']['k'] === 'This') {
+                    return "pyhp_rt_member({$sc}.get(\"this\"), " . $this->cppStr($e['name']) . ')';
+                }
                 return 'pyhp_rt_member(' . $this->emitExpr($e['obj'], $sc) . ', ' . $this->cppStr($e['name']) . ')';
+            case 'Yield':
+                $this->err('generators (yield) are not supported by the native backend yet — use the PHP engines (pyhp run or --target php)', $e['line']);
             case 'Assign':
                 return $this->emitAssign($e, $sc);
             case 'Call':
@@ -965,18 +1136,29 @@ class PyHPCppTranspiler
     private function emitCall(array $e, string $sc): string {
         $callee = $e['callee'];
         $kws = $e['kwargs'] ?? [];
-        if (count($kws) > 0 && !($callee['k'] === 'Var' && in_array($callee['name'], self::NATIVE_BUILTINS, true))) {
-            $this->err('keyword arguments are not supported by the native backend for user functions — pass positional arguments', $e['line']);
-        }
+        $kwNames = count($kws) > 0 ? 'std::vector<std::string>{' . implode(', ', array_map(fn($kw) => $this->cppStr($kw['name']), $kws)) . '}' : 'std::vector<std::string>()';
+        $kwVals = count($kws) > 0 ? 'std::vector<Val>{' . implode(', ', array_map(fn($kw) => $this->emitExpr($kw['expr'], $sc), $kws)) . '}' : 'std::vector<Val>()';
         $args = '{' . implode(', ', array_map(fn($a) => $this->emitExpr($a, $sc), $e['args'])) . '}';
         if ($callee['k'] === 'Super') {
-            $this->err('super() requires classes, which the native backend does not support yet', $e['line']);
+            if ($this->curCls === null) {
+                $this->err('super() can only be used inside a class method', $e['line']);
+            }
+            return "pyhp_rt_super_ctor({$sc}.get(\"this\"), {$this->cppStr($this->classKey($this->curCls))}, {$args}, {$kwNames}, {$kwVals})";
         }
         if ($callee['k'] === 'Member') {
-            if ($callee['obj']['k'] === 'This' || $callee['obj']['k'] === 'Super') {
-                $this->err('method calls on this/super need classes, which the native backend does not support yet', $e['line']);
+            if ($callee['obj']['k'] === 'Super') {
+                if ($this->curCls === null) {
+                    $this->err('super.method() can only be used inside a class method', $e['line']);
+                }
+                return "pyhp_rt_super_method({$sc}.get(\"this\"), {$this->cppStr($this->classKey($this->curCls))}, {$this->cppStr($callee['name'])}, {$args}, {$kwNames}, {$kwVals})";
+            }
+            if ($callee['obj']['k'] === 'This') {
+                return "pyhp_rt_call_method({$sc}.get(\"this\"), {$this->cppStr($callee['name'])}, {$args}, {$kwNames}, {$kwVals})";
             }
             $obj = $this->emitExpr($callee['obj'], $sc);
+            if (count($kws) > 0) {
+                return "pyhp_rt_call_method({$obj}, {$this->cppStr($callee['name'])}, {$args}, {$kwNames}, {$kwVals})";
+            }
             return '[&]{ Val __o = ' . $obj . '; return pyhp_rt_method(__o, ' . $this->cppStr($callee['name']) . ", {$args}); }()";
         }
         if ($callee['k'] === 'Var') {
@@ -986,6 +1168,9 @@ class PyHPCppTranspiler
             }
             if ($this->funcKnown($this->curUnitEmit, $name) && !$this->assignedKnown($this->curUnitEmit, $name)) {
                 return $this->fnCName($this->curUnitEmit, $name) . "({$args})";
+            }
+            if ($this->classKnown($this->curUnitEmit, $name) && !isset($this->modUnits[$this->curUnitEmit]['funcs'][$name])) {
+                return "pyhp_rt_new({$this->cppStr($this->classKey($name))}, {$args}, {$kwNames}, {$kwVals})";
             }
             if (in_array($name, self::NATIVE_BUILTINS, true)) {
                 if (count($kws) > 0) {
@@ -1018,6 +1203,8 @@ class PyHPCppTranspiler
     private string $curUnitEmit = 'main';
     /** Params of the function currently being emitted (callable via scope). */
     private array $curFnParams = [];
+    /** Class whose method is currently being emitted (for super()). */
+    private ?string $curCls = null;
 
     /* ================================================================ */
     /* the embedded C++ runtime                                         */
@@ -1040,6 +1227,7 @@ class PyHPCppTranspiler
 #include <sstream>
 #include <chrono>
 #include <stdexcept>
+#include <map>
 
 struct PyError : std::runtime_error {
     std::string type;
@@ -1048,7 +1236,7 @@ struct PyError : std::runtime_error {
 static void pyhp_rt_throw(const std::string& t, const std::string& m) { throw PyError(t, m); }
 
 struct Val {
-    enum Kind { NUL, IN, FL, ST, BO, LI, DI, FN, ER } k = NUL;
+    enum Kind { NUL, IN, FL, ST, BO, LI, DI, FN, ER, OBJ } k = NUL;
     int64_t i = 0;
     double f = 0.0;
     bool b = false;
@@ -1056,9 +1244,13 @@ struct Val {
     std::shared_ptr<std::vector<Val>> li;
     std::shared_ptr<std::vector<std::pair<std::string, Val>>> di;
     std::shared_ptr<std::function<Val(std::vector<Val>&)>> fn;
-    std::string et;   // FN: function name, ER: error type
+    std::string et;   // FN: function name, ER: error type, OBJ: class name
+    std::shared_ptr<std::map<std::string, Val>> props;   // OBJ: instance properties
     Val() {}
     static Val nul() { return Val(); }
+    static Val mkclass(const std::string& name) {
+        Val x; x.k = OBJ; x.et = name; x.props = std::make_shared<std::map<std::string, Val>>(); return x;
+    }
     static Val mk(int64_t v) { Val x; x.k = IN; x.i = v; return x; }
     static Val mk(double v) { Val x; x.k = FL; x.f = v; return x; }
     static Val mk(bool v) { Val x; x.k = BO; x.b = v; return x; }
@@ -1102,6 +1294,239 @@ static void pyhp_rt_set_argv(int argc, char** argv) {
     for (int i = 1; i < argc; i++) pyhp_rt_argv.push_back(std::string(argv[i]));
 }
 
+static Val pyhp_rt_checktype(Val v, const std::string& t, const std::string& name);
+static std::string pyhp_rt_type_name(const Val& v);
+static Val pyhp_rt_method_obj(const Val& obj, const std::string& name, std::vector<Val> args);
+
+/* ---------------- classes (heap-scoped model) ----------------
+ *
+ * Instances are Val::OBJ — a shared_ptr'd property map plus the class name,
+ * so objects live exactly as long as the values referencing them (the same
+ * aliasing rules as lists/dicts). Method bodies are generated functions;
+ * the registry only stores names, param lists and default-value emitters. */
+
+struct PyClass {
+    std::string name;
+    std::string key;                    // registry key (unit-qualified)
+    std::string parent;                 // registry key, "" if none
+    std::vector<std::pair<std::string, std::string>> props;      // name -> declared type ("" = untyped)
+    std::map<std::string, bool> propInit;                         // name -> has an initializer
+    std::map<std::string, PyFn> methods;                          // name -> generated function
+    std::map<std::string, std::vector<std::string>> methodParams; // name -> param names
+    std::map<std::string, bool> methodVariadic;
+    std::map<std::string, std::function<Val(const std::string&, PyScope&)>> propDefault;
+};
+
+static std::map<std::string, PyClass>& pyhp_rt_classes() {
+    static std::map<std::string, PyClass> reg;
+    return reg;
+}
+
+static void pyhp_rt_class_register(const std::string& key, const std::string& name, const std::string& parent) {
+    PyClass c;
+    c.name = name;
+    c.key = key;
+    c.parent = parent;
+    pyhp_rt_classes()[key] = c;
+}
+
+static void pyhp_rt_class_prop(const std::string& key, const std::string& prop, const std::string& type, bool hasInit) {
+    pyhp_rt_classes()[key].props.push_back({prop, type});
+    pyhp_rt_classes()[key].propInit[prop] = hasInit;
+}
+
+static void pyhp_rt_class_default(const std::string& key, std::function<Val(const std::string&, PyScope&)> fn) {
+    pyhp_rt_classes()[key].propDefault["__default__"] = std::move(fn);
+}
+
+static void pyhp_rt_class_method(const std::string& key, const std::string& name, PyFn fn,
+                                 const std::vector<std::string>& params, bool variadic) {
+    auto& c = pyhp_rt_classes()[key];
+    c.methods[name] = std::move(fn);
+    c.methodParams[name] = params;
+    c.methodVariadic[name] = variadic;
+}
+
+/** Walk a class chain root-first (base class first). */
+static std::vector<const PyClass*> pyhp_rt_class_chain(const std::string& key) {
+    std::vector<const PyClass*> chain;
+    std::string cur = key;
+    while (!cur.empty()) {
+        auto& reg = pyhp_rt_classes();
+        auto it = reg.find(cur);
+        if (it == reg.end()) pyhp_rt_throw("RuntimeError", "unknown class '" + cur + "'");
+        chain.push_back(&it->second);
+        cur = it->second.parent;
+        if (chain.size() > 64) pyhp_rt_throw("RuntimeError", "class inheritance chain too deep");
+    }
+    std::reverse(chain.begin(), chain.end());
+    return chain;
+}
+
+/** Find the registry key that defines a method, searching DOWN the chain
+ *  (most derived override wins, like the interpreter). */
+static std::string pyhp_rt_method_owner(const std::string& key, const std::string& name) {
+    auto chain = pyhp_rt_class_chain(key);
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+        if ((*it)->methods.count(name)) return (*it)->key;
+    }
+    return "";
+}
+
+static bool pyhp_rt_is_missing(const Val& v) { return v.k == Val::OBJ && v.et == "__missing__"; }
+
+static bool pyhp_rt_method_exists(const std::string& key, const std::string& name) {
+    return !pyhp_rt_method_owner(key, name).empty();
+}
+
+/** Bind positional + keyword arguments against a param-name list (Python
+ *  rules: positional first, then keywords fill named slots; missing -> null
+ *  and the method body reads defaults itself via generated checks). */
+static std::vector<Val> pyhp_rt_kw_bind(const std::vector<std::string>& names, bool variadic,
+                                        std::vector<Val> pos,
+                                        const std::vector<std::string>& kwN, const std::vector<Val>& kwV,
+                                        const std::string& label) {
+    size_t n = names.size();
+    std::vector<bool> filled(n, false);
+    std::vector<Val> values(n, Val::nul());
+    std::vector<Val> extra;
+    for (size_t i = 0; i < pos.size(); i++) {
+        if (i < n) { filled[i] = true; values[i] = pos[i]; }
+        else if (variadic) extra.push_back(pos[i]);
+        else pyhp_rt_throw("TypeError", label + "() takes " + std::to_string(n) + " argument(s), " + std::to_string(pos.size()) + " given");
+    }
+    for (size_t k = 0; k < kwN.size(); k++) {
+        long idx = -1;
+        for (size_t i = 0; i < n; i++) { if (names[i] == kwN[k]) { idx = (long)i; break; } }
+        if (idx < 0) pyhp_rt_throw("TypeError", label + "() got an unexpected keyword argument '" + kwN[k] + "'");
+        if (filled[(size_t)idx]) pyhp_rt_throw("TypeError", label + "() got multiple values for argument '" + kwN[k] + "'");
+        filled[(size_t)idx] = true;
+        values[(size_t)idx] = kwV[k];
+    }
+    if (!variadic) {
+        // missing required args are caught by the generated per-param checks
+        for (size_t i = 0; i < n; i++) { if (!filled[i]) values[i] = Val::mkclass("__missing__"); }
+    }
+    for (auto& x : extra) values.push_back(x);
+    return values;
+}
+
+/** Instantiate a class: heap object, property defaults root-first, then the
+ *  nearest __construct/__init in the chain (kwargs supported). */
+static Val pyhp_rt_new(const std::string& key, std::vector<Val> pos,
+                       const std::vector<std::string>& kwN, const std::vector<Val>& kwV) {
+    auto& reg = pyhp_rt_classes();
+    auto it = reg.find(key);
+    if (it == reg.end()) pyhp_rt_throw("RuntimeError", "unknown class '" + key + "'");
+    Val obj = Val::mkclass(key);
+    PyScope env(nullptr);                 // defaults evaluate in a bare scope
+    env.declare("this", obj);
+    for (const PyClass* c : pyhp_rt_class_chain(key)) {
+        auto dfn = c->propDefault.find("__default__");
+        if (dfn != c->propDefault.end()) {
+            for (const auto& [prop, type] : c->props) {
+                Val v = dfn->second(prop, env);
+                // interpreter rule: typed props without an initializer start as
+                // null unchecked; only real initializers are type-checked
+                if (c->propInit.count(prop) && c->propInit.at(prop) && type != "") {
+                    v = pyhp_rt_checktype(v, type, prop);
+                }
+                (*obj.props)[prop] = v;
+            }
+        }
+    }
+    // nearest constructor up the chain = the most derived one (Dog first)
+    std::string ctorName;
+    std::string owner;
+    {
+        auto chain = pyhp_rt_class_chain(key);
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            if ((*it)->methods.count("__construct")) { ctorName = "__construct"; owner = (*it)->key; break; }
+            if ((*it)->methods.count("__init") && ctorName.empty()) { ctorName = "__init"; owner = (*it)->key; break; }
+        }
+    }
+    if (!ctorName.empty()) {
+        const PyClass& oc = reg.at(owner);
+        bool variadic = oc.methodVariadic.at(ctorName);
+        std::vector<Val> bound = pyhp_rt_kw_bind(oc.methodParams.at(ctorName), variadic, pos, kwN, kwV, key);
+        bound.insert(bound.begin(), obj);
+        oc.methods.at(ctorName)(bound);
+    }
+    return obj;
+}
+
+/** Call a method on an instance with full positional+keyword binding. */
+static Val pyhp_rt_call_method(const Val& obj, const std::string& name, std::vector<Val> pos,
+                               const std::vector<std::string>& kwN, const std::vector<Val>& kwV) {
+    if (obj.k != Val::OBJ) {
+        pyhp_rt_throw("TypeError", "'" + pyhp_rt_type_name(obj) + "' object has no method '" + name + "'");
+    }
+    std::string owner = pyhp_rt_method_owner(obj.et, name);
+    if (owner.empty()) {
+        pyhp_rt_throw("RuntimeError", "class '" + obj.et + "' has no method '" + name + "'");
+    }
+    const PyClass& oc = pyhp_rt_classes().at(owner);
+    bool variadic = oc.methodVariadic.at(name);
+    std::vector<Val> bound = pyhp_rt_kw_bind(oc.methodParams.at(name), variadic, std::move(pos), kwN, kwV, name);
+    bound.insert(bound.begin(), obj);
+    return oc.methods.at(name)(bound);
+}
+
+/** super(...) inside a method of `cls`: run the parent constructor. */
+static void pyhp_rt_super_ctor(const Val& obj, const std::string& clsKey, std::vector<Val> pos,
+                               const std::vector<std::string>& kwN, const std::vector<Val>& kwV) {
+    auto& reg = pyhp_rt_classes();
+    auto it = reg.find(clsKey);
+    if (it == reg.end() || it->second.parent.empty()) {
+        pyhp_rt_throw("RuntimeError", "class '" + clsKey + "' has no parent");
+    }
+    std::string parentKey = it->second.parent;
+    {
+        auto chain = pyhp_rt_class_chain(parentKey);
+        for (auto cIt = chain.rbegin(); cIt != chain.rend(); ++cIt) {
+            const PyClass* c = *cIt;
+            if (c->methods.count("__construct")) {
+                const PyClass& oc = *c;
+                bool variadic = oc.methodVariadic.at("__construct");
+                std::vector<Val> bound = pyhp_rt_kw_bind(oc.methodParams.at("__construct"), variadic, std::move(pos), kwN, kwV, "super");
+                bound.insert(bound.begin(), obj);
+                oc.methods.at("__construct")(bound);
+                return;
+            }
+            if (c->methods.count("__init")) {
+                const PyClass& oc = *c;
+                bool variadic = oc.methodVariadic.at("__init");
+                std::vector<Val> bound = pyhp_rt_kw_bind(oc.methodParams.at("__init"), variadic, std::move(pos), kwN, kwV, "super");
+                bound.insert(bound.begin(), obj);
+                oc.methods.at("__init")(bound);
+                return;
+            }
+        }
+    }
+}
+
+/** super.method(...) inside a method of `cls`. */
+static Val pyhp_rt_super_method(const Val& obj, const std::string& clsKey, const std::string& name,
+                                std::vector<Val> pos, const std::vector<std::string>& kwN, const std::vector<Val>& kwV) {
+    auto& reg = pyhp_rt_classes();
+    auto it = reg.find(clsKey);
+    if (it == reg.end() || it->second.parent.empty()) {
+        pyhp_rt_throw("RuntimeError", "class '" + clsKey + "' has no parent");
+    }
+    std::string parentKey = it->second.parent;
+    std::string owner = pyhp_rt_method_owner(parentKey, name);
+    if (owner.empty()) {
+        pyhp_rt_throw("RuntimeError", "parent class has no method '" + name + "'");
+    }
+    const PyClass& oc = reg.at(owner);
+    bool variadic = oc.methodVariadic.at(name);
+    std::vector<Val> bound = pyhp_rt_kw_bind(oc.methodParams.at(name), variadic, std::move(pos), kwN, kwV, name);
+    bound.insert(bound.begin(), obj);
+    return oc.methods.at(name)(bound);
+}
+
+static Val pyhp_rt_callval(const Val& f, std::vector<Val> args);
+
 static std::string pyhp_rt_type_name(const Val& v) {
     switch (v.k) {
         case Val::NUL: return "null";
@@ -1113,6 +1538,7 @@ static std::string pyhp_rt_type_name(const Val& v) {
         case Val::DI:  return "dict";
         case Val::FN:  return "function";
         case Val::ER:  return v.et;
+        case Val::OBJ: return v.et;
     }
     return "unknown";
 }
@@ -1204,6 +1630,18 @@ static std::string pyhp_rt_tostr(const Val& v) {
         }
         case Val::FN: return "<function " + v.et + ">";
         case Val::ER: return *v.s;
+        case Val::OBJ: {
+            // __str__ / __toString override, like the interpreter's hook
+            std::string m = pyhp_rt_method_exists(v.et, "__str__") ? "__str__"
+                : (pyhp_rt_method_exists(v.et, "__toString") ? "__toString" : "");
+            if (!m.empty()) {
+                std::vector<std::string> kwN;
+                std::vector<Val> kwV;
+                Val r = pyhp_rt_call_method(v, m, {}, kwN, kwV);
+                return r.k == Val::ST ? *r.s : pyhp_rt_tostr(r);
+            }
+            return "<" + v.et + " object>";
+        }
     }
     return "unknown";
 }
@@ -1573,6 +2011,7 @@ static bool pyhp_rt_eq(const Val& a, const Val& b) {
         return true;
     }
     if (a.k == Val::ER || b.k == Val::ER || a.k == Val::FN || b.k == Val::FN) return &a == &b;
+    if (a.k == Val::OBJ || b.k == Val::OBJ) return a.k == Val::OBJ && b.k == Val::OBJ && a.props == b.props;
     if (a.k == Val::BO || b.k == Val::BO) {
         if (pyhp_rt_is_num(a) && pyhp_rt_is_num(b)) {
             double x = a.k == Val::FL ? a.f : (double)pyhp_rt_as_int(a);
@@ -1713,6 +2152,38 @@ static Val pyhp_rt_slice(const Val& c, const Val& start, const Val& stop, const 
 }
 static std::vector<std::pair<Val, Val>> pyhp_rt_pairs(const Val& v) {
     std::vector<std::pair<Val, Val>> out;
+    if (v.k == Val::OBJ) {
+        // iterator protocol: __iter__ (optional) then __next__ until StopIteration
+        Val it = v;
+        if (pyhp_rt_method_exists(v.et, "__iter__")) {
+            std::vector<std::string> kwN;
+            std::vector<Val> kwV;
+            it = pyhp_rt_call_method(v, "__iter__", {}, kwN, kwV);
+            if (it.k == Val::LI) {
+                int64_t i = 0;
+                for (const Val& x : *it.li) { out.push_back({Val::mk(i++), x}); }
+                return out;
+            }
+            if (it.k != Val::OBJ) pyhp_rt_throw("TypeError", "__iter__ must return an object or list");
+        }
+        if (!pyhp_rt_method_exists(it.et, "__next__")) {
+            pyhp_rt_throw("TypeError", "'" + pyhp_rt_type_name(v) + "' object is not iterable");
+        }
+        std::vector<std::string> kwN;
+        std::vector<Val> kwV;
+        int64_t i = 0;
+        while (true) {
+            Val x;
+            try {
+                x = pyhp_rt_call_method(it, "__next__", {}, kwN, kwV);
+            } catch (PyError& e) {
+                if (e.type == "StopIteration") break;
+                throw;
+            }
+            out.push_back({Val::mk(i++), x});
+        }
+        return out;
+    }
     if (v.k == Val::LI) {
         int64_t i = 0;
         for (const Val& x : *v.li) { out.push_back({Val::mk(i++), x}); }
@@ -1730,11 +2201,14 @@ static std::vector<std::pair<Val, Val>> pyhp_rt_pairs(const Val& v) {
     pyhp_rt_throw("TypeError", "'" + pyhp_rt_type_name(v) + "' object is not iterable");
     return out;
 }
+static std::vector<std::pair<Val, Val>> pyhp_rt_pairs(const Val& v);
+
 static std::vector<Val> pyhp_rt_itervals(const Val& v) {
     std::vector<Val> out;
-    if (v.k == Val::LI) { for (const Val& x : *v.li) out.push_back(x); return out; }
-    if (v.k == Val::DI) { for (const auto& p : *v.di) out.push_back(pyhp_rt_key_decode(p.first)); return out; }
-    if (v.k == Val::ST) { for (char ch : *v.s) out.push_back(Val::mk(std::string(1, ch))); return out; }
+    if (v.k == Val::OBJ || v.k == Val::LI || v.k == Val::DI || v.k == Val::ST) {
+        for (const auto& kv : pyhp_rt_pairs(v)) { out.push_back(kv.second); }
+        return out;
+    }
     pyhp_rt_throw("TypeError", "'" + pyhp_rt_type_name(v) + "' object is not iterable");
     return out;
 }
@@ -1793,7 +2267,17 @@ static Val pyhp_rt_errval(const PyError& e) {
     return v;
 }
 static bool pyhp_rt_catch_match(const PyError& e, const std::string& t) {
-    return t == "Exception" || e.type == t;
+    if (t == "Exception") return true;
+    // user exception classes: walk the registered class chain
+    std::string cur = e.type;
+    while (!cur.empty()) {
+        if (cur == t) return true;
+        auto& reg = pyhp_rt_classes();
+        auto it = reg.find(cur);
+        if (it == reg.end()) break;
+        cur = it->second.parent;
+    }
+    return e.type == t;
 }
 static Val pyhp_rt_checktype(Val v, const std::string& t, const std::string& name) {
     auto bad = [&]() {
@@ -1815,6 +2299,20 @@ static Val pyhp_rt_checktype(Val v, const std::string& t, const std::string& nam
 /* ---------------- members & methods ---------------- */
 static Val pyhp_rt_member(const Val& obj, const std::string& name) {
     if (obj.k == Val::ER && name == "message") return Val::mk(*obj.s);
+    if (obj.k == Val::OBJ) {
+        auto it = obj.props->find(name);
+        if (it != obj.props->end()) return it->second;
+        // method read: a bound callable, like the interpreter
+        if (!pyhp_rt_method_owner(obj.et, name).empty()) {
+            Val objCopy = obj;
+            return Val::mk(PyFn([objCopy, name](std::vector<Val>& args) {
+                std::vector<std::string> kwN;
+                std::vector<Val> kwV;
+                return pyhp_rt_call_method(objCopy, name, args, kwN, kwV);
+            }));
+        }
+        pyhp_rt_throw("RuntimeError", "'" + obj.et + "' object has no property '" + name + "'");
+    }
     if (obj.k == Val::DI) {
         for (const auto& p : *obj.di) { if (p.first == name) return p.second; }
     }
@@ -1822,6 +2320,19 @@ static Val pyhp_rt_member(const Val& obj, const std::string& name) {
     return Val::nul();
 }
 static void pyhp_rt_member_set(const Val& obj, const std::string& name, const Val& v) {
+    if (obj.k == Val::OBJ) {
+        // declared type check on every write (interpreter semantics)
+        for (const PyClass* c : pyhp_rt_class_chain(obj.et)) {
+            for (const auto& [prop, type] : c->props) {
+                if (prop == name && type != "") {
+                    (*obj.props)[name] = pyhp_rt_checktype(v, type, name);
+                    return;
+                }
+            }
+        }
+        (*obj.props)[name] = v;
+        return;
+    }
     if (obj.k == Val::DI) {
         for (auto& p : *obj.di) { if (p.first == name) { p.second = v; return; } }
         obj.di->push_back({name, v});
@@ -1849,6 +2360,15 @@ static std::string pyhp_rt_trim(const std::string& s) {
     return s.substr(a, b - a + 1);
 }
 static Val pyhp_rt_method(const Val& obj, const std::string& name, std::vector<Val> args) {
+    if (obj.k == Val::OBJ) {
+        std::vector<std::string> kwN;
+        std::vector<Val> kwV;
+        return pyhp_rt_call_method(obj, name, std::move(args), kwN, kwV);
+    }
+    return pyhp_rt_method_obj(obj, name, std::move(args));
+}
+
+static Val pyhp_rt_method_obj(const Val& obj, const std::string& name, std::vector<Val> args) {
     auto need = [&](int lo, int hi) {
         int n = (int)args.size();
         if (n < lo || (hi != -1 && n > hi))
@@ -2587,6 +3107,36 @@ static Val pyhp_rt_call(const std::string& name, std::vector<Val> A) {
     if (name == "str")   { need(0, 1); return A.empty() ? Val::mk(std::string()) : Val::mk(pyhp_rt_tostr(A[0])); }
     if (name == "bool")  { need(0, 1); return A.empty() ? Val::mk(false) : Val::mk(pyhp_rt_truthy(A[0])); }
     if (name == "type")  { need(1, 1); return Val::mk(pyhp_rt_type_name(A[0])); }
+    if (name == "isinstance") {
+        need(2, 2);
+        if (A[1].k != Val::ST) pyhp_rt_throw("TypeError", "isinstance() second argument must be a type name string");
+        std::string want = *A[1].s;
+        bool ok = false;
+        if (A[0].k == Val::OBJ) {
+            std::string cur = A[0].et;
+            while (!cur.empty()) {
+                if (cur == want) { ok = true; break; }
+                auto it = pyhp_rt_classes().find(cur);
+                if (it == pyhp_rt_classes().end()) break;
+                cur = it->second.parent;
+            }
+        } else if (A[0].k == Val::ER) {
+            std::string cur = A[0].et;
+            while (!cur.empty()) {
+                if (cur == want) { ok = true; break; }
+                auto it = pyhp_rt_classes().find(cur);
+                if (it == pyhp_rt_classes().end()) break;
+                cur = it->second.parent;
+            }
+            ok = ok || want == A[0].et;
+        } else {
+            std::string tn = pyhp_rt_type_name(A[0]);
+            ok = (want == "int" && tn == "int") || (want == "float" && tn == "float")
+                || (want == "string" && tn == "string") || (want == "bool" && tn == "bool")
+                || (want == "list" && tn == "list") || (want == "dict" && tn == "dict");
+        }
+        return Val::mk(ok);
+    }
     if (name == "chr") {
         need(1, 1);
         int64_t n = pyhp_rt_int1(A[0], "chr");
@@ -2695,6 +3245,7 @@ static std::string pyhp_rt_to_s(const Val& v, const std::string& fn) {
 enum PyHpVKind : unsigned char { PYHP_VN = 0, PYHP_VI = 1, PYHP_VF = 2, PYHP_VS = 3 };
 struct pyhp_val { unsigned char kind; int64_t i; double f; const char* s; };
 struct pyhp_list { int64_t len; pyhp_val* items; };
+struct pyhp_dict { int64_t len; char** keys; pyhp_val* items; };
 
 /* Convert a PyHP list value into C-bridge form. String items are strdup'd —
  * bridge lists own their strings; release with pyhp_list_free(). */
@@ -2737,6 +3288,67 @@ static void pyhp_list_free(pyhp_list* L) {
     }
     std::free(L->items);
     L->items = nullptr;
+}
+
+/* Convert a PyHP dict value into C-bridge form. Keys become strings (int
+ * keys ride as decimal digits; the \x01 storage marker is decoded first).
+ * Strings are strdup'd — release everything with pyhp_dict_free(). */
+static pyhp_dict pyhp_val_to_dict(const Val& v, const char* fn) {
+    if (v.k != Val::DI) pyhp_rt_throw("TypeError", std::string(fn) + "() expects a dict (pyhp_dict) argument");
+    pyhp_dict D;
+    D.len = (int64_t)v.di->size();
+    D.keys = (char**)std::malloc(sizeof(char*) * (size_t)(D.len > 0 ? D.len : 1));
+    D.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (size_t)(D.len > 0 ? D.len : 1));
+    int64_t n = 0;
+    for (const auto& p : *v.di) {
+        Val kd = pyhp_rt_key_decode(p.first);
+        std::string ks = (kd.k == Val::IN) ? std::to_string(kd.i) : (kd.k == Val::ST ? *kd.s : "");
+        D.keys[n] = strdup(ks.c_str());
+        pyhp_val pv; pv.kind = PYHP_VN; pv.i = 0; pv.f = 0.0; pv.s = nullptr;
+        if (p.second.k == Val::IN) { pv.kind = PYHP_VI; pv.i = p.second.i; }
+        else if (p.second.k == Val::FL) { pv.kind = PYHP_VF; pv.f = p.second.f; }
+        else if (p.second.k == Val::ST) { pv.kind = PYHP_VS; pv.s = strdup(p.second.s->c_str()); }
+        else if (p.second.k == Val::BO) { pv.kind = PYHP_VI; pv.i = p.second.b ? 1 : 0; }
+        D.items[n] = pv;
+        n++;
+    }
+    return D;
+}
+
+/* Materialise a C-bridge dict (returned by a cpp export) as a PyHP dict.
+ * Keys that are all digits become int keys (json_parse round-trip rule).
+ * Storage keys use the \x01 marker for ints so 1 and "1" stay distinct. */
+static Val pyhp_dict_to_val(const pyhp_dict& D) {
+    Val out = Val::mkdict();
+    for (int64_t i = 0; i < D.len; i++) {
+        std::string k = D.keys[i] ? D.keys[i] : "";
+        std::string store = k;
+        if (!k.empty() && k.find_first_not_of("0123456789") == std::string::npos) {
+            store = std::string("\x01", 1) + k;   // int key marker
+        }
+        const pyhp_val& p = D.items[i];
+        Val v;
+        if (p.kind == PYHP_VI) v = Val::mk(p.i);
+        else if (p.kind == PYHP_VF) v = Val::mk(p.f);
+        else if (p.kind == PYHP_VS) v = Val::mk(std::string(p.s ? p.s : ""));
+        else v = Val::nul();
+        out.di->push_back({store, v});
+    }
+    return out;
+}
+
+/* Release dict memory allocated by the bridge (malloc'd keys/items + strdup'd
+ * strings — the ownership contract for dicts a cpp export returns). */
+static void pyhp_dict_free(pyhp_dict* D) {
+    if (!D->items) return;
+    for (int64_t i = 0; i < D->len; i++) {
+        if (D->keys[i]) std::free((void*)D->keys[i]);
+        if (D->items[i].kind == PYHP_VS && D->items[i].s != nullptr) std::free((void*)D->items[i].s);
+    }
+    std::free(D->keys);
+    std::free(D->items);
+    D->keys = nullptr;
+    D->items = nullptr;
 }
 CPP;
     }

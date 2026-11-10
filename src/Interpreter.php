@@ -18,6 +18,7 @@ class PyHPInterpreter
     private string $classNs = '';       // non-empty while loading a module ('m0\')
     private array $modules = [];        // realpath => export PyDict (null while loading)
     private array $fileDirs = [];       // stack of dirs of the file(s) being executed
+    public bool $useVm = false;         // bytecode VM engine (pyhp run default; --tree disables)
 
     public function __construct() {
         require_once __DIR__ . '/runtime.php';
@@ -40,6 +41,39 @@ class PyHPInterpreter
                 return null;   // not iterable — let the caller report it
             }
         };
+        $GLOBALS['__pyhp_lazy_iter_hook'] = function ($v) {
+            if (!($v instanceof InterpInstance)) return null;
+            $hasMethod = function (InterpInstance $inst, string $n): bool {
+                for ($c = $inst->cls; $c !== null; $c = $c->parent) {
+                    if (isset($c->methods[$n])) return true;
+                }
+                return false;
+            };
+            if (!$hasMethod($v, '__iter__') && !$hasMethod($v, '__next__')) return null;
+            $interp = $this;
+            return (function () use ($v, $interp, $hasMethod) {
+                $obj = $v;
+                if ($hasMethod($v, '__iter__')) {
+                    $f = $interp->findMethod($v->cls, '__iter__');
+                    $obj = $interp->invokeMethodWithSuper($v, $f, []);
+                    if ($obj instanceof PyList) { yield from $obj->a; return; }
+                    if (!($obj instanceof InterpInstance)) {
+                        throw new PyHPTypeError('__iter__ must return an object or list');
+                    }
+                }
+                if (!$hasMethod($obj, '__next__')) {
+                    throw new PyHPTypeError("'" . pyhp_type_name($v) . "' object is not iterable");
+                }
+                try {
+                    while (true) {
+                        $f = $interp->findMethod($obj->cls, '__next__');
+                        yield $interp->invokeMethodWithSuper($obj, $f, []);
+                    }
+                } catch (PyHPThrow $t) {
+                    if (!pyhp_throw_is_stop($t)) throw $t;
+                }
+            })();
+        };
     }
 
     /* ================================================================ */
@@ -57,6 +91,8 @@ class PyHPInterpreter
         $cwd = getcwd();
         return $cwd === false ? '.' : $cwd;
     }
+
+    public function currentDirPub(): string { return $this->currentDir(); }
 
     /** Class registry key, namespaced while a module is loading. */
     private function clsKey(string $n): string { return $this->classNs . $n; }
@@ -153,14 +189,22 @@ class PyHPInterpreter
     }
 
     /** Execute statements; if the program is a single bare expression,
-     *  return its value (used by the REPL). */
-    public function runProgram(array $stmts) {
+     *  return its value (used by the REPL). engine: 'vm' (default) or 'tree'. */
+    public function runProgram(array $stmts, string $engine = 'vm') {
         $value = null;
         $isExpr = count($stmts) === 1 && $stmts[0]['k'] === 'Expr'
             && in_array($stmts[0]['e']['k'], ['Assign', 'Post'], true) === false;
+        if ($engine === 'vm') {
+            require_once __DIR__ . '/Vm.php';
+            $this->useVm = true;
+        }
         foreach ($stmts as $s) {
             if ($isExpr && $s === $stmts[0]) {
                 $value = $this->evalExpr($s['e'], $this->global);
+            } elseif ($this->useVm && !$isExpr) {
+                // whole program on the VM (top-level statements compile once)
+                require_once __DIR__ . '/Vm.php';
+                PyHPVm::run($this, PyHPVm::compile([$s]), $this->global);
             } else {
                 $this->execStmt($s, $this->global);
             }
@@ -199,6 +243,7 @@ class PyHPInterpreter
                 $f->interp = $this;
                 $f->cls = null;
                 $f->fileDir = $this->currentDir();
+                $f->isGenerator = pyhp_ast_has_yield($f->body);
                 if ($s['name'] !== null) {
                     $env->assign($s['name'], $f);
                 }
@@ -247,7 +292,7 @@ class PyHPInterpreter
             }
             case 'Foreach': {
                 $itv = $this->evalExpr($s['iter'], $env);
-                $items = $itv instanceof InterpInstance ? $this->interpIterate($itv) : pyhp_foreach($itv);
+                $items = $this->lazyIterable($itv);
                 foreach ($items as $k => $v) {
                     try {
                         if ($s['var2'] !== null) {
@@ -325,13 +370,6 @@ class PyHPInterpreter
 
     private function runFinally(array $s, PyHPEnv $env): void {
         if ($s['finally'] !== null) $this->execStmt($s['finally'], $env);
-    }
-
-    private function instanceMatches(InterpInstance $inst, string $name): bool {
-        for ($c = $inst->cls; $c !== null; $c = $c->parent) {
-            if ($c->name === $name) return true;
-        }
-        return false;
     }
 
     /** Wrap any thrown PyHP value into an exception instance. */
@@ -432,6 +470,7 @@ class PyHPInterpreter
                 $f->interp = $this;
                 $f->cls = $cls;
                 $f->fileDir = $this->currentDir();
+                $f->isGenerator = pyhp_ast_has_yield($f->body);
                 $cls->methods[$m['name']] = $f;
             } elseif ($m['k'] === 'VarDecl') {
                 $cls->propStmts[] = $m;
@@ -445,6 +484,17 @@ class PyHPInterpreter
             if (isset($c->methods[$name])) return $c->methods[$name];
         }
         return null;
+    }
+
+    public function instanceMatches(InterpInstance $inst, string $name): bool {
+        for ($c = $inst->cls; $c !== null; $c = $c->parent) {
+            if ($c->name === $name) return true;
+        }
+        return false;
+    }
+
+    public function errorInstanceFor(PyHPError $e): InterpInstance {
+        return $this->errorToInstance($e);
     }
 
     private function chainClasses(ClassDef $leaf): array {
@@ -480,6 +530,14 @@ class PyHPInterpreter
         return $inst;
     }
 
+    public function lazyIterablePub($itv) {
+        return $this->lazyIterable($itv);
+    }
+
+    public function asThrowableInstancePub($v): InterpInstance {
+        return $this->asThrowableInstance($v);
+    }
+
     /** Iterator protocol for interpreter instances: __iter__() then
      *  __next__() until a StopIteration raise ends the stream. */
     private function interpIterate(InterpInstance $v): array {
@@ -513,6 +571,25 @@ class PyHPInterpreter
         return $out;
     }
 
+    /** Lazy streaming iterable for foreach: views and generators stream one
+     *  item at a time; user iterators stream through the lazy hook; plain
+     *  PHP arrays iterate in place. */
+    private function lazyIterable($itv) {
+        if ($itv instanceof PyHPView || $itv instanceof PyHPGenerator) return $itv;
+        if ($itv instanceof InterpInstance) {
+            $hook = $GLOBALS['__pyhp_lazy_iter_hook'] ?? null;
+            if ($hook !== null) {
+                $t = $hook($itv);
+                if ($t !== null) return $t;
+            }
+            throw new PyHPTypeError("'" . pyhp_type_name($itv) . "' object is not iterable");
+        }
+        if ($itv instanceof PyList) return $itv->a;
+        if ($itv instanceof PyDict) return $itv->d;
+        if (is_string($itv)) return pyhp_chars($itv);
+        return pyhp_foreach($itv);
+    }
+
     private function invokeMethodWithSuper(InterpInstance $inst, InterpFunc $f, array $args, array $kwargs = []) {
         return $this->callFunction($f, $args, $inst, $f->cls, $kwargs);
     }
@@ -529,64 +606,30 @@ class PyHPInterpreter
         $pushedDir = false;
         if ($f->fileDir !== null) { $this->fileDirs[] = $f->fileDir; $pushedDir = true; }
         try {
+            if ($f->isGenerator) {
+                return $this->makeGenerator($f, $args, $kwargs, $thisInst, $superCls);
+            }
             $env = new PyHPEnv($f->env);
             if ($thisInst !== null) $env->declare('this', $thisInst);
             if ($superCls !== null) $env->declare('__supercls', $superCls);
-
-            // bind parameters: positional first (in order), then keyword arguments
-            $nNamed = 0;
-            foreach ($f->params as $p) { if (!$p['variadic']) $nNamed++; }
-            $given = count($args);
-            $hasVar = $this->hasVariadic($f->params);
-            if (!$hasVar && $given > $nNamed) {
-                throw new PyHPTypeError("{$f->name}() takes {$nNamed} argument(s), {$given} given");
-            }
+            $this->checkArity($f, $args);
             if ($f->native !== null) {
                 if (count($kwargs) > 0) {
                     throw new PyHPTypeError("{$f->name}() does not accept keyword arguments");
                 }
                 return ($f->native)($env, $args);
             }
-            $namedNames = [];
-            foreach ($f->params as $p) { if (!$p['variadic']) $namedNames[] = $p['name']; }
-            $values = array_slice($args, 0, $nNamed);
-            while (count($values) < $nNamed) { $values[] = null; }
-            $filled = [];
-            for ($i = 0; $i < $nNamed; $i++) { $filled[$i] = $i < $given; }
-            foreach ($kwargs as $kw) {
-                $idx = array_search($kw['name'], $namedNames, true);
-                if ($idx === false) {
-                    throw new PyHPTypeError("{$f->name}() got an unexpected keyword argument '{$kw['name']}'");
+            $this->bindArgs($f, $args, $kwargs, $env);
+            if ($this->useVm) {
+                require_once __DIR__ . '/Vm.php';
+                $ret = PyHPVm::runFunction($this, $f, $env);
+            } else {
+                try {
+                    $this->execStmts($f->body, $env);
+                    $ret = null;
+                } catch (PyHPReturn $r) {
+                    $ret = $r->value;
                 }
-                if ($filled[$idx]) {
-                    throw new PyHPTypeError("{$f->name}() got multiple values for argument '{$kw['name']}'");
-                }
-                $values[$idx] = $kw['value'];
-                $filled[$idx] = true;
-            }
-            $i = 0;
-            foreach ($f->params as $p) {
-                if ($p['variadic']) {
-                    $rest = array_slice($args, $nNamed);
-                    $env->declare($p['name'], new PyList($rest));
-                    break;
-                }
-                if ($filled[$i]) {
-                    $v = $values[$i];
-                } elseif ($p['def'] !== null) {
-                    $v = $this->evalExpr($p['def'], $env);
-                } else {
-                    throw new PyHPTypeError("{$f->name}() missing required argument '{$p['name']}'");
-                }
-                if ($p['type'] !== null) $v = pyhp_check_type($v, $p['type'], $p['name']);
-                $env->declare($p['name'], $v);
-                $i++;
-            }
-            try {
-                $this->execStmts($f->body, $env);
-                $ret = null;
-            } catch (PyHPReturn $r) {
-                $ret = $r->value;
             }
             if ($f->ret !== null) {
                 $ret = pyhp_check_type($ret, $f->ret, $f->name . '() return');
@@ -596,6 +639,79 @@ class PyHPInterpreter
             $this->depth--;
             if ($pushedDir) { array_pop($this->fileDirs); }
         }
+    }
+
+    /** Arity errors happen at call time (like Python, generators included). */
+    private function checkArity(InterpFunc $f, array $args): void {
+        $nNamed = 0;
+        foreach ($f->params as $p) { if (!$p['variadic']) $nNamed++; }
+        $given = count($args);
+        if (!$this->hasVariadic($f->params) && $given > $nNamed) {
+            throw new PyHPTypeError("{$f->name}() takes {$nNamed} argument(s), {$given} given");
+        }
+    }
+
+    /** Positional + keyword binding into a fresh call frame (shared by the
+     *  normal call path and the generator path). */
+    private function bindArgs(InterpFunc $f, array $args, array $kwargs, PyHPEnv $env): void {
+        $nNamed = 0;
+        foreach ($f->params as $p) { if (!$p['variadic']) $nNamed++; }
+        $given = count($args);
+        $namedNames = [];
+        foreach ($f->params as $p) { if (!$p['variadic']) $namedNames[] = $p['name']; }
+        $values = array_slice($args, 0, $nNamed);
+        while (count($values) < $nNamed) { $values[] = null; }
+        $filled = [];
+        for ($i = 0; $i < $nNamed; $i++) { $filled[$i] = $i < $given; }
+        foreach ($kwargs as $kw) {
+            $idx = array_search($kw['name'], $namedNames, true);
+            if ($idx === false) {
+                throw new PyHPTypeError("{$f->name}() got an unexpected keyword argument '{$kw['name']}'");
+            }
+            if ($filled[$idx]) {
+                throw new PyHPTypeError("{$f->name}() got multiple values for argument '{$kw['name']}'");
+            }
+            $values[$idx] = $kw['value'];
+            $filled[$idx] = true;
+        }
+        $i = 0;
+        foreach ($f->params as $p) {
+            if ($p['variadic']) {
+                $rest = array_slice($args, $nNamed);
+                $env->declare($p['name'], new PyList($rest));
+                break;
+            }
+            if ($filled[$i]) {
+                $v = $values[$i];
+            } elseif ($p['def'] !== null) {
+                $v = $this->evalExpr($p['def'], $env);
+            } else {
+                throw new PyHPTypeError("{$f->name}() missing required argument '{$p['name']}'");
+            }
+            if ($p['type'] !== null) $v = pyhp_check_type($v, $p['type'], $p['name']);
+            $env->declare($p['name'], $v);
+            $i++;
+        }
+    }
+
+    /** Call a generator function: returns a PyHPGenerator streaming lazily.
+     *  The body is compiled once into PHP generator code where every variable
+     *  access goes through the frame's PyHPEnv (GenCompiler), so closures,
+     *  module state, `this` and late binding match the tree-walker exactly. */
+    private function makeGenerator(InterpFunc $f, array $args, array $kwargs, ?InterpInstance $thisInst, ?ClassDef $superCls) {
+        $env = new PyHPEnv($f->env);
+        if ($thisInst !== null) $env->declare('this', $thisInst);
+        if ($superCls !== null) $env->declare('__supercls', $superCls);
+        $this->checkArity($f, $args);
+        $this->bindArgs($f, $args, $kwargs, $env);
+        require_once __DIR__ . '/GenCompiler.php';
+        if ($f->genSrc === '') {
+            $gc = new PyHPGenCompiler();
+            $f->genSrc = $gc->compile($f->name, $f->params, $f->body);
+        }
+        $__pyhp_env = $env;
+        $__pyhp_interp = $this;
+        return new PyHPGenerator(eval($f->genSrc), $f->name);
     }
 
     private function hasVariadic(array $params): bool {
@@ -708,6 +824,7 @@ class PyHPInterpreter
                 $f->body = $e['body']['stmts'];
                 $f->env = $env;
                 $f->interp = $this;
+                $f->isGenerator = pyhp_ast_has_yield($f->body);
                 return $f;
         }
         throw new PyHPRuntimeError("line {$e['line']}: unsupported expression kind '{$e['k']}'");
@@ -942,40 +1059,7 @@ class PyHPInterpreter
             throw new PyHPError("line {$e['line']}: '" . pyhp_type_name($obj) . "' object has no method '{$callee['name']}'");
         }
         if ($callee['k'] === 'Var') {
-            $name = $callee['name'];
-            if ($env->has($name)) {
-                $target = $env->get($name);
-                if (!is_callable($target)) {
-                    throw new PyHPTypeError("line {$e['line']}: '{$name}' is not callable (" . pyhp_type_name($target) . ")");
-                }
-                if ($target instanceof InterpFunc) {
-                    return $this->invokeFunc($target, $args, $kws);
-                }
-                if ($target instanceof PyHPBuiltin) {
-                    return pyhp_call_builtin($target->name, $args, $kws);
-                }
-                if (count($kws) > 0) {
-                    throw new PyHPTypeError("line {$e['line']}: '{$name}' does not accept keyword arguments");
-                }
-                return $target(...$args);
-            }
-            if ($name === 'require') {
-                if (count($kws) > 0) {
-                    throw new PyHPError("line {$e['line']}: require() takes exactly 1 argument(s)");
-                }
-                return $this->loadModule($args, $e['line']);
-            }
-            $cls = $this->clsFind($name);
-            if ($cls !== null) {
-                return $this->instantiate($cls, $args, $kws);
-            }
-            if (pyhp_builtin_exists($name)) {
-                return pyhp_call_builtin($name, $args, $kws);
-            }
-            if (PyHPCppNative::has($name)) { // native cpp export (lazy compile on first call)
-                return PyHPCppNative::call($name, $args, $kws);
-            }
-            throw new PyHPError("line {$e['line']}: undefined function '{$name}'");
+            return $this->callVarName($callee['name'], $args, $kws, $env, $e['line']);
         }
         // general callable expression
         $target = $this->evalExpr($callee, $env);
@@ -989,6 +1073,44 @@ class PyHPInterpreter
             throw new PyHPTypeError("line {$e['line']}: expression does not accept keyword arguments");
         }
         return $target(...$args);
+    }
+
+    /** Var-name call resolution, shared with compiled generator bodies
+     *  (pyhp_call_name). Same ordering as the interpreter's evalCall. */
+    public function callVarName(string $name, array $args, array $kws, PyHPEnv $env, int $line) {
+        if ($env->has($name)) {
+            $target = $env->get($name);
+            if (!is_callable($target)) {
+                throw new PyHPTypeError("line {$line}: '{$name}' is not callable (" . pyhp_type_name($target) . ")");
+            }
+            if ($target instanceof InterpFunc) {
+                return $this->invokeFunc($target, $args, $kws);
+            }
+            if ($target instanceof PyHPBuiltin) {
+                return pyhp_call_builtin($target->name, $args, $kws);
+            }
+            if (count($kws) > 0) {
+                throw new PyHPTypeError("line {$line}: '{$name}' does not accept keyword arguments");
+            }
+            return $target(...$args);
+        }
+        if ($name === 'require') {
+            if (count($kws) > 0) {
+                throw new PyHPError("line {$line}: require() takes exactly 1 argument(s)");
+            }
+            return $this->loadModule($args, $line);
+        }
+        $cls = $this->clsFind($name);
+        if ($cls !== null) {
+            return $this->instantiate($cls, $args, $kws);
+        }
+        if (pyhp_builtin_exists($name)) {
+            return pyhp_call_builtin($name, $args, $kws);
+        }
+        if (PyHPCppNative::has($name)) {
+            return PyHPCppNative::call($name, $args, $kws);
+        }
+        throw new PyHPError("line {$line}: undefined function '{$name}'");
     }
 
     private function callSuperConstructor(array $args, array $kws, PyHPEnv $env, int $line) {

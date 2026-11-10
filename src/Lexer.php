@@ -22,7 +22,7 @@ class PyHPLexer
         'for', 'foreach', 'in', 'not', 'and', 'or', 'break', 'continue',
         'try', 'catch', 'finally', 'throw', 'class', 'extends',
         'this', 'super', 'parent', 'echo', 'true', 'false', 'null', 'var',
-        'int', 'float', 'string', 'bool', 'list', 'dict',
+        'int', 'float', 'string', 'bool', 'list', 'dict', 'yield',
     ];
 
     public const TYPE_KWS = ['int', 'float', 'string', 'bool', 'list', 'dict', 'var'];
@@ -182,12 +182,20 @@ class PyHPLexer
             if ($digits === '') {
                 throw new PyHPSyntaxError("line {$line}: malformed number literal");
             }
-            $v = intval($digits, ['x' => 16, 'b' => 2, 'o' => 8][$base]);
             if (ctype_alnum($this->src[$this->i - 1]) === false) {
                 throw new PyHPSyntaxError("line {$line}: malformed number literal");
             }
             if ($this->i < $this->n && ($this->src[$this->i] === '_' || ctype_alpha($this->src[$this->i]))) {
                 throw new PyHPSyntaxError("line {$line}: malformed number literal");
+            }
+            $v = intval($digits, ['x' => 16, 'b' => 2, 'o' => 8][$base]);
+            // out-of-64-bit literals stay exact via big-int (like Python)
+            if (strlen($digits) >= 16) {
+                $dec = PyBigMath::fromBase($digits, ['x' => 16, 'b' => 2, 'o' => 8][$base]);
+                if (!pyhp_big_fits_int($dec)) {
+                    return ['t' => 'INT', 'v' => new PyBigInt($dec), 'line' => $line];
+                }
+                $v = (int)$dec;
             }
             return ['t' => 'INT', 'v' => $v, 'line' => $line];
         }
@@ -215,6 +223,10 @@ class PyHPLexer
         $text = substr($this->src, $start, $this->i - $start);
         if ($isFloat) {
             return ['t' => 'FLOAT', 'v' => (float)$text, 'line' => $line];
+        }
+        // out-of-64-bit literals stay exact via big-int (like Python)
+        if (strlen($text) > 19 || (strlen($text) === 19 && strcmp($text, '9223372036854775807') > 0)) {
+            return ['t' => 'INT', 'v' => new PyBigInt($text), 'line' => $line];
         }
         return ['t' => 'INT', 'v' => (int)$text, 'line' => $line];
     }

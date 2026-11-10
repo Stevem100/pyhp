@@ -323,11 +323,11 @@ class PyHPTranspiler
                     $r2 = $this->unitVarWrite($s['var2']) ?? "\${$s['var2']}";
                     $this->markAssigned($s['var1']); $this->markAssigned($s['var2']);
                     if (!$this->atUnitTop) { $this->markLocal($s['var1']); $this->markLocal($s['var2']); }
-                    $this->w($L, "foreach (pyhp_foreach({$iter}) as {$r1} => {$r2}) {");
+                    $this->w($L, "foreach (pyhp_iter({$iter}) as {$r1} => {$r2}) {");
                 } else {
                     $this->markAssigned($s['var1']);
                     if (!$this->atUnitTop) $this->markLocal($s['var1']);
-                    $this->w($L, "foreach (pyhp_foreach({$iter}) as {$r1}) {");
+                    $this->w($L, "foreach (pyhp_iter({$iter}) as {$r1}) {");
                 }
                 $this->indent++;
                 $this->emitStmt($s['body'], $L);
@@ -751,6 +751,10 @@ class PyHPTranspiler
     }
 
     private function emitTopFunction(array $s, array &$L): void {
+        if (pyhp_ast_has_yield($s['body']['stmts'])) {
+            $this->emitGeneratorFunction($s, $L, []);
+            return;
+        }
         $this->w($L, 'function ' . $this->fnPhp($s['name']) . '(' . $this->emitParamList($s['params']) . ') {');
         $this->indent++;
         $this->pushScope();
@@ -780,10 +784,17 @@ class PyHPTranspiler
         $name = $s['name'];
         // bind the name first so the closure can capture itself for recursion
         $this->markAssigned($name);
+        if (pyhp_ast_has_yield($s['body']['stmts'])) {
+            $this->w($L, "\${$name} = " . $this->emitGenClosure($s, [$name]) . ';');
+            return;
+        }
         $this->w($L, "\${$name} = " . $this->emitClosure($s, [$name]) . ';');
     }
 
     private function emitClosure(array $s, array $extraSelfRefs = []): string {
+        if (pyhp_ast_has_yield($s['body']['stmts'])) {
+            return $this->emitGenClosure($s, $extraSelfRefs);
+        }
         // captures: everything assigned so far minus this function's own params
         // and minus unit-level vars (those resolve via `global` / the unit bucket)
         $params = $this->paramNames($s['params']);
@@ -816,6 +827,77 @@ class PyHPTranspiler
         $this->popScope();
         $inner = implode("\n", array_map(fn($l) => $l === '' ? '' : '    ' . $l, $body));
         return 'function (' . $this->emitParamList($s['params']) . "){$use} {\n" . $inner . "\n}";
+    }
+
+    /* ---------------- generators (compiled mode) ----------------
+     *
+     * A function containing `yield` emits an outer function with the usual
+     * prologue (arity/default errors fire at call time, like Python) that
+     * returns a PyHPGenerator wrapping an inner PHP generator closure with
+     * the real `yield`s. Variables ride PHP's closure capture, so late
+     * binding matches the PHP engines exactly. */
+
+    private function emitGeneratorFunction(array $s, array &$L, array $extraSelfRefs): void {
+        $this->w($L, 'function ' . $this->fnPhp($s['name']) . '(' . $this->emitParamList($s['params']) . ') {');
+        $this->indent++;
+        $this->pushScope();
+        $gd = $this->globalDecl($this->paramNames($s['params']));
+        $prevRet = $this->curRet;
+        $this->curRet = null;
+        $savedTop = $this->atUnitTop;
+        $this->atUnitTop = false;
+        $this->emitPrologue($s['params'], $s['name'], $L);
+        $useVars = array_merge($this->paramNames($s['params']), $extraSelfRefs);
+        $use = count($useVars) > 0 ? ' use (' . implode(', ', array_map(fn($v) => '&$' . $v, $useVars)) . ')' : '';
+        $this->w($L, "return new PyHPGenerator((function (){$use} {");
+        $this->indent++;
+        if ($gd !== null) { $this->w($L, $gd); }
+        foreach ($s['body']['stmts'] as $st) { $this->emitStmt($st, $L); }
+        $this->indent--;
+        $this->w($L, "})(), " . var_export($s['name'], true) . ');');
+        $this->atUnitTop = $savedTop;
+        $this->curRet = $prevRet;
+        $this->popScope();
+        $this->indent--;
+        $this->w($L, '}');
+        $this->w($L, '');
+    }
+
+    /** Anonymous/nested generator closure: an outer closure (with the usual
+     *  prologue) whose call returns a PyHPGenerator wrapping an inner PHP
+     *  generator closure that carries the real `yield`s. */
+    private function emitGenClosure(array $s, array $extraSelfRefs = []): string {
+        $params = $this->paramNames($s['params']);
+        $captures = array_values(array_diff(
+            $this->assignedSoFar(), $params, $extraSelfRefs,
+            array_keys($this->unitVars[$this->ns] ?? [])
+        ));
+        $outerUseParts = array_map(fn($c) => '&$' . $c, $captures);
+        foreach ($extraSelfRefs as $r) { $outerUseParts[] = '&$' . $r; }
+        $outerUse = count($outerUseParts) > 0 ? ' use (' . implode(', ', $outerUseParts) . ')' : '';
+        $label = $s['name'] ?? '<generator>';
+        $body = [];
+        $this->pushScope();
+        $prevRet = $this->curRet;
+        $this->curRet = null;
+        $savedTop = $this->atUnitTop;
+        $this->atUnitTop = false;
+        $gd = $this->globalDecl($params);
+        if ($gd !== null) { $this->w($body, $gd); }
+        $this->emitPrologue($s['params'], $label, $body);
+        $innerUse = array_map(fn($c) => '&$' . $c, $captures);
+        foreach ($params as $p) { $innerUse[] = '$' . $p; }   // params by value into the gen
+        $innerUseStr = count($innerUse) > 0 ? ' use (' . implode(', ', $innerUse) . ')' : '';
+        $this->w($body, "return new PyHPGenerator((function (){$innerUseStr} {");
+        $this->indent++;
+        foreach ($s['body']['stmts'] as $st) { $this->emitStmt($st, $body); }
+        $this->indent--;
+        $this->w($body, "})(), " . var_export($label, true) . ');');
+        $this->atUnitTop = $savedTop;
+        $this->curRet = $prevRet;
+        $this->popScope();
+        $inner = implode("\n", array_map(fn($l) => $l === '' ? '' : '    ' . $l, $body));
+        return 'function (' . $this->emitParamList($s['params']) . "){$outerUse} {\n" . $inner . "\n}";
     }
 
     /* ---------------- classes ---------------- */
@@ -916,6 +998,31 @@ class PyHPTranspiler
     }
 
     private function emitMethod(array $m, array &$L): void {
+        if (pyhp_ast_has_yield($m['body']['stmts'])) {
+            // generator method: PHP closures inside methods bind $this automatically
+            $this->w($L, 'public function ' . $m['name'] . '(' . $this->emitParamList($m['params']) . ') {');
+            $this->indent++;
+            $this->pushScope();
+            $prevRet = $this->curRet;
+            $this->curRet = null;
+            $savedTop = $this->atUnitTop;
+            $this->atUnitTop = false;
+            $this->emitPrologue($m['params'], $m['name'], $L);
+            $params = $this->paramNames($m['params']);
+            $this->w($L, 'return new PyHPGenerator((function () use (' . implode(', ', array_map(fn($v) => '$' . $v, $params)) . ') {');
+            $this->indent++;
+            $gd = $this->globalDecl($params);
+            if ($gd !== null) { $this->w($L, $gd); }
+            foreach ($m['body']['stmts'] as $st) { $this->emitStmt($st, $L); }
+            $this->indent--;
+            $this->w($L, "})(), " . var_export($m['name'], true) . ');');
+            $this->atUnitTop = $savedTop;
+            $this->curRet = $prevRet;
+            $this->popScope();
+            $this->indent--;
+            $this->w($L, '}');
+            return;
+        }
         $this->w($L, 'public function ' . $m['name'] . '(' . $this->emitParamList($m['params']) . ') {');
         $this->indent++;
         $this->pushScope();
@@ -947,7 +1054,9 @@ class PyHPTranspiler
     private function emitExpr(array $e): string {
         switch ($e['k']) {
             case 'Num':
-                return var_export($e['v'], true);
+                return $e['v'] instanceof PyBigInt
+                    ? 'pyhp_big(' . var_export($e['v']->dec, true) . ')'
+                    : var_export($e['v'], true);
             case 'Str':
                 return var_export($e['v'], true);
             case 'Bool':
@@ -988,8 +1097,14 @@ class PyHPTranspiler
                 return 'new PyList([' . implode(', ', $items) . '])';
             }
             case 'Dict': {
-                $pairs = array_map(fn($p) => $this->emitExpr($p[0]) . ' => ' . $this->emitExpr($p[1]), $e['pairs']);
-                return 'new PyDict([' . implode(', ', $pairs) . '])';
+                // flat [k, v, k, v, ...] list -> guarded pairs (big-int keys,
+                // and any other key, pass through pyhp_guard_key like the interpreter)
+                $flat = [];
+                foreach ($e['pairs'] as [$pk, $pv]) {
+                    $flat[] = $this->emitExpr($pk);
+                    $flat[] = $this->emitExpr($pv);
+                }
+                return 'new PyDict(pyhp_dict_pairs([' . implode(', ', $flat) . ']))';
             }
             case 'Comp':
                 return $this->emitComp($e);
@@ -1022,6 +1137,8 @@ class PyHPTranspiler
             }
             case 'Call':
                 return $this->emitCall($e);
+            case 'Yield':
+                return 'yield' . ($e['e'] !== null ? ' (' . $this->emitExpr($e['e']) . ')' : '');
             case 'Func':
                 return '(' . $this->emitClosure($e) . ')';
         }

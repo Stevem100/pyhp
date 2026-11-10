@@ -28,6 +28,9 @@ function pyhp_usage(): void {
 PyHP {$v} — PHP syntax, Python brains, C muscles.
 
   pyhp run <script.pyh> [args...]      run via the built-in interpreter
+                                       (add --tree to skip the bytecode VM)
+  pyhp langs [php|python|cpp|js|full]  offline syntax/function bridge to other
+                                       languages — no other runtime needed
   pyhp build <script.pyh> -o out.php   transpile to a standalone PHP file
   pyhp build <f.pyh> --target cpp -o app.cpp    transpile to C++17 source
   pyhp build <f.pyh> --target native -o app     transpile + g++ -> native binary
@@ -65,6 +68,14 @@ function pyhp_fail(Throwable $e): int {
 /* ----------------------------------------------------------------- */
 
 function pyhp_run_file(string $path, array $scriptArgs): int {
+    $engine = 'vm';
+    $filtered = [];
+    foreach ($scriptArgs as $a) {
+        if ($a === '--tree' || $a === '--no-vm') { $engine = 'tree'; continue; }
+        if ($a === '--vm') { $engine = 'vm'; continue; }
+        $filtered[] = $a;
+    }
+    $scriptArgs = $filtered;
     if (!is_file($path)) {
         fwrite(STDERR, "PyHP: cannot find script '{$path}'\n");
         return 1;
@@ -75,7 +86,7 @@ function pyhp_run_file(string $path, array $scriptArgs): int {
         $stmts = PyHPParser::parseSource($src);
         $interp = new PyHPInterpreter();
         $interp->setMainFile($path);
-        $interp->runProgram($stmts);
+        $interp->runProgram($stmts, $engine);
         return 0;
     } catch (PyHPExit $e) {
         return $e->exitCode;
@@ -971,8 +982,15 @@ if ($cmd === 'repl') {
     exit(pyhp_repl());
 }
 if ($cmd === 'run') {
-    if (!isset($argv[2])) { fwrite(STDERR, "usage: pyhp run <script.pyh> [args...]\n"); exit(1); }
-    exit(pyhp_run_file($argv[2], array_slice($argv, 3)));
+    // engine flags may appear anywhere after `run`; the rest are script args
+    $runArgs = array_slice($argv, 2);
+    $filtered = [];
+    foreach ($runArgs as $a) {
+        if ($a === '--tree' || $a === '--no-vm' || $a === '--vm') continue;
+        $filtered[] = $a;
+    }
+    if (count($filtered) === 0) { fwrite(STDERR, "usage: pyhp run <script.pyh> [args...]\n"); exit(1); }
+    exit(pyhp_run_file($filtered[0], array_slice($filtered, 1)));
 }
 if ($cmd === 'build') {
     $file = null; $out = null; $target = 'php';
@@ -996,6 +1014,50 @@ if ($cmd === 'build') {
 if ($cmd === 'compile') {
     if (!isset($argv[2])) { fwrite(STDERR, "usage: pyhp compile <script.pyh> [args...]\n"); exit(1); }
     exit(pyhp_compile_run($argv[2], array_slice($argv, 3)));
+}
+/* ----------------------------------------------------------------- */
+/* offline cross-language reference (pyhp langs)                     */
+/* ----------------------------------------------------------------- */
+
+function pyhp_langs_cmd(array $args): int {
+    require_once __DIR__ . '/../src/langdata.php';
+    $sel = $args[0] ?? 'compact';
+    $langs = [
+        'PyHP'   => 'PyHP',
+        'Python' => 'Python',
+        'PHP'    => 'PHP',
+        'C++'    => 'C++',
+        'JS'     => 'JavaScript',
+    ];
+    switch (strtolower($sel)) {
+        case 'python': case 'py':   $show = ['PyHP', 'Python']; break;
+        case 'php':                 $show = ['PyHP', 'PHP']; break;
+        case 'cpp': case 'c++':     $show = ['PyHP', 'C++']; break;
+        case 'js': case 'node': case 'javascript': $show = ['PyHP', 'JS']; break;
+        case 'full': case 'all':    $show = array_keys($langs); break;
+        case 'compact': default:    $show = ['PyHP', 'Python', 'PHP']; break;
+    }
+    $data = pyhp_langs_data();
+    $rows = 0;
+    foreach ($data as $section => $entries) {
+        echo $section, "\n", str_repeat('-', 64), "\n";
+        foreach ($entries as [$topic, $pyhp, $python, $php, $cpp, $js]) {
+            $cells = ['PyHP' => $pyhp, 'Python' => $python, 'PHP' => $php, 'C++' => $cpp, 'JS' => $js];
+            echo '  ', $topic, "\n";
+            foreach ($show as $l) {
+                echo '      ', str_pad($langs[$l] . ':', 12), $cells[$l], "\n";
+            }
+            $rows++;
+        }
+        echo "\n";
+    }
+    echo $rows, " entries — PyHP needs only PHP to run; use `pyhp langs full` for C++/JavaScript\n";
+    return 0;
+}
+
+if (
+$cmd === 'langs') {
+    exit(pyhp_langs_cmd(array_slice($argv, 2)));
 }
 if ($cmd === 'pkg') {
     exit(pyhp_pkg_main(array_slice($argv, 2)));

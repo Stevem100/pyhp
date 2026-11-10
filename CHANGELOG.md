@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.7.0 — the rest of the roadmap: generators, native classes, dicts across the bridge, bytecode VM, big-ints
+
+**Generators (`yield`)**
+- A function containing `yield` is a generator: calling it runs nothing until
+  you iterate. Works on functions, lambdas, methods (with `this`) and nested
+  functions; closures, module state and kwargs behave exactly like the
+  tree-walker. `next(it, default)` is new (raises `StopIteration` or returns
+  the default). Generator bodies compile to real PHP generators on both PHP
+  engines — byte-identical; the native backend reports a clear error.
+
+**Lazy views**
+- `range`/`map`/`filter`/`zip`/`enumerate`/`reversed` return lazy views instead
+  of materialized lists (Python semantics): infinite streams compose,
+  `foreach`/comprehensions stream, `list(v)`/`sorted(v)` materialize.
+  `range` supports big-int bounds, indexing, slicing (returns another range)
+  and computed `in`; `len(range(...))` is exact. Reprs are deterministic:
+  `range(0, 5)`, `<map object>`, `<generator object fib>`.
+- Behavior change: printing a view shows the Python-style repr — wrap in
+  `list(...)` for the old list output. `reversed()` accepts lists, strings
+  and ranges. The native backend stays eager (documented divergence).
+
+**Native classes in the C++ backend**
+- Classes now run natively with a heap-scoped model (reference-counted
+  instances, same aliasing rules as lists/dicts): properties with defaults and
+  declared-type checks on every write, `__construct`/`__init` with defaults
+  **and keyword arguments**, inheritance with `super(...)` / `super.method(...)`
+  (kwargs included), method overrides (most-derived wins), `__str__`,
+  `isinstance(obj, "Name")`, the `__iter__`/`__next__` protocol, and throwing
+  user exception classes (`throw MyError("x")`, catch matching walks the
+  chain). Output is byte-identical to the interpreter for the covered
+  feature set (new suite case).
+- Not supported natively (clear errors): generators/lazy views, `try/finally`,
+  big-int values, `extends SomeVar`.
+
+**Dicts across the C++ bridge**
+- `pyhp_dict` joins `pyhp_list` in the cpp ABI (`struct pyhp_dict { int64_t
+  len; char** keys; pyhp_val* items; }`), working in the native backend and
+  the exec helper; the FFI bridge reports that it cannot marshal structs.
+  Keys ride as C strings, all-digit keys become int keys on the PyHP side
+  (same rule as `json_parse`); the malloc/strdup ownership contract mirrors
+  lists and is documented in REFERENCE.md §18.
+
+**Bytecode VM for the interpreter path**
+- `pyhp run` now executes through a stack-based bytecode VM (src/Vm.php):
+  programs compile to flat ops (constants, loads/stores, arithmetic,
+  comparisons, jumps, echo, return) on a dispatch loop; functions compile
+  once and cache. Calls, member access, classes and `cpp { }` blocks delegate
+  to the shared runtime helpers, so VM output is byte-identical to the
+  tree-walker by construction — `pyhp run --tree` keeps the classic engine,
+  and the suite now runs every case on **three** engines (tree + VM +
+  transpiler).
+
+**Big-int arithmetic**
+- Integer arithmetic that overflows 64-bit promotes to an exact
+  arbitrary-precision int (`9223372036854775807 + 1`, `2 ** 100`), and
+  out-of-range int literals (decimal and `0x`/`0b`/`0o`) parse exactly.
+  Comparisons, `sum`, `sorted`, dict keys, `range` bounds, f-string specs
+  (`d b o x X`), `hex`/`bin`, `int("999...")` are all exact; `/` past float
+  range raises the new `OverflowError` (Python behavior); `%` keeps Python's
+  floor-mod rules; bitwise ops on big values use gmp when present (bundled
+  build ships it) and raise a clear error otherwise. Python-style promotion
+  rules verified against gmp as ground truth.
+
+**`pyhp langs` — one simple way to see the other languages' syntax**
+- `pyhp langs [python|php|cpp|js|full]` prints an offline syntax/function
+  bridge (81 entries: printing, strings, collections, control flow, functions,
+  classes, errors, builtins, files, PyHP notes) — no other runtime needed.
+  The same tables are generated into [`docs/BRIDGE.md`](docs/BRIDGE.md) by
+  `tools/build_langs.php` from `src/langdata.php`.
+
+**Docs, tests, tooling**
+- Test suite: 46 main cases × three engines (tree, VM, compiled) plus native
+  and exec-helper bridge cases — byte-identical output required. 49 passed,
+  0 failed.
+- REFERENCE.md documents generators, lazy views, big-ints, the VM, native
+  classes, the dict bridge and `pyhp langs`; the AI kit (`ai/`) is regenerated
+  from the live engine.
+
 ## 0.6.0 — the roadmap sprint: format specs, modules, bridge, iterators
 
 **F-string format specs (`{x:.2f}`)**

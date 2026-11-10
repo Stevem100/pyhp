@@ -638,6 +638,18 @@ class PyHPParser
                     return ['k' => 'Func', 'name' => $f['name'], 'params' => $f['params'], 'ret' => $f['ret'], 'body' => $f['body'], 'line' => $line, 'expr' => true];
                 }
                 if ($tok['v'] === 'lambda') return $this->parseLambda();
+                if ($tok['v'] === 'yield') {
+                    if ($this->funcDepth === 0) {
+                        $this->err("'yield' outside a function (yield turns a function into a lazy generator)");
+                    }
+                    $this->pos++;
+                    // bare `yield` when the next token cannot start an expression
+                    $canExpr = !($this->atOp(';') || $this->atOp('}') || $this->atOp(')')
+                        || $this->atOp(']') || $this->atOp(',') || $this->atOp(':')
+                        || $this->at('EOF'));
+                    $e = $canExpr ? $this->parseTernary() : null;
+                    return ['k' => 'Yield', 'e' => $e, 'line' => $line];
+                }
                 if ($tok['v'] === 'list' || $tok['v'] === 'dict') {
                     $this->pos++;
                     return ['k' => 'Var', 'name' => $tok['v'], 'line' => $line];
@@ -668,7 +680,9 @@ class PyHPParser
             if ($this->atOp(',')) $this->pos++;
         }
         $this->expectOp(':');
+        $this->funcDepth++;               // a lambda body is a function body (yield allowed)
         $e = $this->parseExpression();
+        $this->funcDepth--;
         return [
             'k' => 'Func', 'name' => null, 'params' => $params, 'ret' => null,
             'body' => ['k' => 'Block', 'stmts' => [['k' => 'Return', 'e' => $e, 'line' => $line]], 'line' => $line],

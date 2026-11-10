@@ -15,7 +15,7 @@
 if (defined('PYHP_RUNTIME')) { return; }
 define('PYHP_RUNTIME', '1');
 
-const PYHP_VERSION = '0.6.0';
+const PYHP_VERSION = '0.7.0';
 
 /* =========================================================================
  * 1. Errors
@@ -37,6 +37,7 @@ class PyHPZeroDivisionError extends PyHPError{ public string $pyhpType = 'ZeroDi
 class PyHPMemError extends PyHPError         { public string $pyhpType = 'MemError'; }
 class PyHPRuntimeError extends PyHPError     { public string $pyhpType = 'RuntimeError'; }
 class PyHPSyntaxError extends PyHPError      { public string $pyhpType = 'SyntaxError'; }
+class PyHPOverflowError extends PyHPError    { public string $pyhpType = 'OverflowError'; }
 
 /** PyHP builtin error name -> PHP class (used by transpiler + isinstance). */
 function pyhp_error_class_map(): array {
@@ -49,6 +50,7 @@ function pyhp_error_class_map(): array {
         'ZeroDivisionError' => 'PyHPZeroDivisionError',
         'MemError'          => 'PyHPMemError',
         'RuntimeError'      => 'PyHPRuntimeError',
+        'OverflowError'     => 'PyHPOverflowError',
         'StopIteration'     => 'PyHPStopIteration',
     ];
 }
@@ -184,6 +186,9 @@ class InterpFunc {
     public ?string $ret = null;
     public $native = null; // closure($env, $args) for builtin methods (e.g. Exception ctor)
     public ?string $fileDir = null; // dir of the file this function was defined in (require resolution)
+    public bool $isGenerator = false;   // body contains `yield` at this level
+    public string $genSrc = '';         // cached compiled PHP generator source
+    public $vmOps = null;               // cached bytecode (VM engine)
     public function __invoke(...$args) {
         return $this->interp->invokeFunc($this, $args);
     }
@@ -237,9 +242,335 @@ class InterpInstance {
 class PyHPReturn extends Exception    { public $value; public function __construct($v) { $this->value = $v; } }
 class PyHPBreak extends Exception     {}
 class PyHPContinue extends Exception  {}
-class PyHPStopIteration extends PyHPError {}
+class PyHPStopIteration extends PyHPError { public string $pyhpType = 'StopIteration'; }
 class PyHPThrow extends Exception     { public $value; public function __construct($v) { $this->value = $v; } }
 class PyHPExit extends Exception      { public int $exitCode; public function __construct(int $c) { $this->exitCode = $c; } }
+
+/* =========================================================================
+ * 3b. Lazy views & generators (the "lazy DNA")
+ *
+ * range/map/filter/zip/enumerate/reversed return PyHPView objects that
+ * stream one item at a time (Python semantics) instead of materializing a
+ * list. `yield` turns any function into a PyHPGenerator. Both implement
+ * IteratorAggregate, so foreach streams lazily; list()/sorted()/
+ * pyhp_iter_values() materialize on demand.
+ * -------------------------------------------------------------------- */
+
+class PyHPView implements Iterator {
+    public string $kind;
+    public array $args;
+    private $stream = null;
+
+    public function __construct(string $kind, array $args) {
+        $this->kind = $kind;
+        $this->args = $args;
+    }
+
+    /** The one underlying stream — views are single-use, like Python iterators. */
+    public function getIterator(): Traversable {
+        if ($this->stream === null) { $this->stream = $this->buildStream(); }
+        return $this->stream;
+    }
+
+    public function __iter__() { return $this; }
+
+    public function __next__() { return $this->streamNext(); }
+
+    /* Iterator protocol (pyhp_iter hands views out as-is) */
+    public function current(): mixed { $this->ensureStream(); return $this->stream->current(); }
+    public function key(): mixed { $this->ensureStream(); return $this->stream->key(); }
+    public function next(): void { $this->ensureStream(); $this->stream->next(); }
+    public function rewind(): void { $this->ensureStream(); }
+    public function valid(): bool { $this->ensureStream(); return $this->stream->valid(); }
+
+    private function ensureStream(): void {
+        if ($this->stream === null) { $this->stream = $this->buildStream(); }
+    }
+
+    private function streamNext() {
+        $this->ensureStream();
+        if (!$this->stream->valid()) throw new PyHPStopIteration();
+        $v = $this->stream->current();
+        $this->stream->next();
+        return $v;
+    }
+
+    private function buildStream(): Generator {
+        switch ($this->kind) {
+            case 'range':
+                yield from $this->rangeStream();
+                return;
+            case 'map': {
+                $f = $this->args[0];
+                $cols = [];
+                foreach (array_slice($this->args, 1) as $it) { $cols[] = pyhp_iter($it); }
+                while (true) {
+                    $row = []; $ok = true;
+                    foreach ($cols as $c) {
+                        if (!$c->valid()) { $ok = false; break; }
+                        $row[] = $c->current();
+                    }
+                    if (!$ok) return;
+                    yield pyhp_callfunc($f, $row, 'map callback');
+                    foreach ($cols as $c) { $c->next(); }
+                }
+                return;
+            }
+            case 'filter': {
+                $f = $this->args[0];
+                $src = pyhp_iter($this->args[1]);
+                for (; $src->valid(); $src->next()) {
+                    $v = $src->current();
+                    if (pyhp_truthy(pyhp_callfunc($f, [$v], 'filter callback'))) { yield $v; }
+                }
+                return;
+            }
+            case 'zip': {
+                $cols = [];
+                foreach ($this->args as $it) { $cols[] = pyhp_iter($it); }
+                while (true) {
+                    $row = []; $ok = true;
+                    foreach ($cols as $c) {
+                        if (!$c->valid()) { $ok = false; break; }
+                        $row[] = $c->current();
+                    }
+                    if (!$ok) return;
+                    yield new PyList($row);
+                    foreach ($cols as $c) { $c->next(); }
+                }
+                return;
+            }
+            case 'enumerate': {
+                $src = pyhp_iter($this->args[0]);
+                $i = $this->args[1];
+                for (; $src->valid(); $src->next()) {
+                    yield new PyList([$i, $src->current()]);
+                    $i = pyhp_add($i, 1);
+                }
+                return;
+            }
+            case 'reversed': {
+                $seq = $this->args[0];
+                if (is_string($seq)) {
+                    $chars = pyhp_chars($seq);
+                    for ($i = count($chars) - 1; $i >= 0; $i--) { yield $chars[$i]; }
+                    return;
+                }
+                if ($seq instanceof PyList) {
+                    for ($i = count($seq->a) - 1; $i >= 0; $i--) { yield $seq->a[$i]; }
+                    return;
+                }
+                // range view: walk indices backwards without materializing
+                $n = $seq->rangeLen();
+                for ($i = pyhp_sub($n, 1); pyhp_compare($i, -1) > 0; $i = pyhp_sub($i, 1)) {
+                    yield $seq->rangeAt($i);
+                }
+                return;
+            }
+        }
+        throw new PyHPRuntimeError("unknown view kind '{$this->kind}'");
+    }
+
+    /* ---- range-specific helpers (exact with big-int bounds) ---- */
+
+    private function rangeStream(): Generator {
+        [$s, $e, $st] = [$this->args[0], $this->args[1], $this->args[2]];
+        $big = $s instanceof PyBigInt || $e instanceof PyBigInt || $st instanceof PyBigInt;
+        if ($big) {
+            $cur = pyhp_to_big($s);
+            $step = pyhp_to_big($st);
+            $end = pyhp_to_big($e);
+            $neg = $step->dec[0] === '-';
+            while ($neg ? pyhp_big_cmp($cur, $end) > 0 : pyhp_big_cmp($cur, $end) < 0) {
+                yield $cur;
+                $cur = pyhp_big_add($cur, $step);
+            }
+        } else {
+            if ($st > 0) { for ($i = $s; $i < $e; $i += $st) { yield $i; } }
+            else { for ($i = $s; $i > $e; $i += $st) { yield $i; } }
+        }
+    }
+
+    /** len(range(...)) — exact, big included. */
+    public function rangeLen() {
+        $s = pyhp_to_big($this->args[0]);
+        $e = pyhp_to_big($this->args[1]);
+        $st = pyhp_to_big($this->args[2]);
+        $diff = pyhp_big_sub($e, $s);
+        $negStep = $st->dec[0] === '-';
+        $fwd = $negStep ? pyhp_big_neg($diff) : $diff;      // distance travelled
+        $zero = new PyBigInt('0');
+        if (pyhp_big_cmp($fwd, $zero) <= 0) return 0;
+        $astep = $negStep ? pyhp_big_neg($st) : $st;
+        [$q, $r] = pyhp_big_divmod($fwd, $astep);
+        $len = $r->dec === '0' ? $q : pyhp_big_add($q, new PyBigInt('1'));
+        return pyhp_big_fits_int($len->dec) ? (int)$len->dec : $len;
+    }
+
+    /** range[i] with clamping and negative indices (Python semantics). */
+    public function rangeAt($i) {
+        $s = pyhp_to_big($this->args[0]);
+        $st = pyhp_to_big($this->args[2]);
+        $idx = pyhp_to_big($i);
+        return pyhp_big_add($s, pyhp_big_mul($st, $idx));
+    }
+
+    public function rangeGet($i) {
+        if (!pyhp_int_like($i) && !(is_float($i) && floor($i) === $i)) {
+            throw new PyHPTypeError('range indices must be int, got ' . pyhp_type_name($i));
+        }
+        $n = pyhp_to_big($this->rangeLen());
+        $j = pyhp_to_big(is_float($i) ? (int)$i : $i);
+        if ($j->dec[0] === '-') { $j = pyhp_big_add($j, $n); }
+        if (pyhp_big_cmp($j, new PyBigInt('0')) < 0 || pyhp_big_cmp($j, $n) >= 0) {
+            throw new PyHPIndexError("range index {$i} out of range (length " . pyhp_tostr($this->rangeLen()) . ")");
+        }
+        return $this->rangeAt($j);
+    }
+}
+
+class PyHPGenerator implements Iterator {
+    public $gen;
+    public string $fnName;
+    public function __construct($gen, string $fnName) {
+        $this->gen = $gen;
+        $this->fnName = $fnName;
+    }
+    public function getIterator(): Traversable { return $this->gen; }
+    public function __iter__() { return $this; }
+    public function __next__() {
+        if (!$this->gen->valid()) throw new PyHPStopIteration();
+        $v = $this->gen->current();
+        $this->gen->next();
+        return $v;
+    }
+    public function current(): mixed { return $this->gen->current(); }
+    public function key(): mixed { return $this->gen->key(); }
+    public function next(): void { $this->gen->next(); }
+    public function rewind(): void {}
+    public function valid(): bool { return $this->gen->valid(); }
+    /** Does the generator carry a `return` value (Python StopIteration.value)? */
+    public function result() {
+        if ($this->gen->valid()) throw new PyHPRuntimeError("generator is still running");
+        return $this->gen->getReturn();
+    }
+}
+
+/** Lazy iteration for foreach/comprehensions: streams views and generators,
+ *  wraps everything else (user iterators via the lazy hook when present). */
+function pyhp_iter($v): Traversable {
+    if ($v instanceof PyHPView || $v instanceof PyHPGenerator) return $v;
+    if ($v instanceof PyList) return new ArrayIterator(array_values($v->a));
+    if ($v instanceof PyDict) return new ArrayIterator($v->d);
+    if (is_string($v)) return new ArrayIterator(pyhp_chars($v));
+    if (is_object($v) && !($v instanceof Closure)) {
+        $hook = $GLOBALS['__pyhp_lazy_iter_hook'] ?? null;
+        if ($hook !== null) {
+            $t = $hook($v);
+            if ($t !== null) return $t;
+        }
+        // transpiled user classes: __iter__()/__next__() protocol
+        $it = $v;
+        if (method_exists($v, '__iter__')) {
+            $it = $v->__iter__();
+            if ($it instanceof PyList) return new ArrayIterator(array_values($it->a));
+        }
+        if (is_object($it) && method_exists($it, '__next__')) {
+            return (function () use ($it) {
+                try {
+                    while (true) { yield $it->__next__(); }
+                } catch (PyHPStopIteration $e) {
+                } catch (PyHPThrow $t) {
+                    if (!pyhp_throw_is_stop($t)) throw $t;
+                }
+            })();
+        }
+    }
+    return new ArrayIterator(pyhp_foreach($v));   // fallback: materialize
+}
+
+/** AST walk: does this function body contain `yield` at its own level?
+ *  Nested functions/lambdas do not make the outer function a generator. */
+function pyhp_ast_has_yield(array $stmts): bool {
+    return pyhp_expr_has_yield($stmts);
+}
+
+/** Recursive walk over any AST shape (nodes, lists of nodes, pairs). */
+function pyhp_expr_has_yield($node): bool {
+    if (!is_array($node)) return false;
+    if (isset($node['k']) && is_string($node['k'])) {
+        if ($node['k'] === 'Yield') return true;
+        if ($node['k'] === 'Func') return false;   // nested scope boundary
+        foreach ($node as $key => $child) {
+            if ($key === 'k' || $key === 'line') continue;
+            if (pyhp_expr_has_yield($child)) return true;
+        }
+        return false;
+    }
+    foreach ($node as $child) {
+        if (pyhp_expr_has_yield($child)) return true;
+    }
+    return false;
+}
+
+/* ---- helpers used by compiled generator bodies (GenCompiler) ---- */
+
+function pyhp_env_post(PyHPEnv $env, string $n, int $dir) {
+    $old = $env->get($n);
+    if (!pyhp_is_num($old)) {
+        $op = $dir > 0 ? "'++'" : "'--'";
+        throw new PyHPTypeError("{$op} requires a numeric variable, got " . pyhp_type_name($old));
+    }
+    $env->assign($n, $dir > 0 ? pyhp_add($old, 1) : pyhp_sub($old, 1));
+    return $old;
+}
+
+/** Build an interpreter function value from an embedded AST node. */
+function pyhp_env_def_func($interp, PyHPEnv $env, array $ast) {
+    $f = new InterpFunc();
+    $f->name = $ast['name'] ?? '<lambda>';
+    $f->params = $ast['params'];
+    $f->ret = $ast['ret'] ?? null;
+    $f->body = $ast['body']['stmts'];
+    $f->env = $env;
+    $f->interp = $interp;
+    $f->isGenerator = pyhp_ast_has_yield($f->body);
+    $f->fileDir = $interp->currentDirPub();
+    return $f;
+}
+
+function pyhp_interp_eval($interp, PyHPEnv $env, array $ast) {
+    return $interp->evalExpr($ast, $env);
+}
+
+function pyhp_interp_exec($interp, PyHPEnv $env, array $ast): void {
+    $interp->execStmt($ast, $env);
+}
+
+/** Var-name call resolution for compiled generator bodies. */
+function pyhp_call_name($interp, string $name, array $args, array $kws, int $line, PyHPEnv $env) {
+    return $interp->callVarName($name, $args, $kws, $env, $line);
+}
+
+/** try/catch matching for compiled generator bodies. Returns
+ *  [catchIndex, varName, instance] for the first matching catch or null. */
+function pyhp_try_match($interp, $e, array $catches) {
+    $inst = null;
+    if ($e instanceof PyHPThrow) {
+        $inst = $e->value instanceof InterpInstance ? $e->value : null;
+        if ($inst === null) return null;
+    } elseif ($e instanceof PyHPError) {
+        $inst = $interp->errorInstanceFor($e);
+    } else {
+        return null;   // PyHPReturn / Break / Continue / Exit are not user errors
+    }
+    foreach ($catches as $i => $c) {
+        if ($c['type'] === null || $interp->instanceMatches($inst, $c['type'])) {
+            return [$i, $c['var'], $inst];
+        }
+    }
+    return null;
+}
 
 /* =========================================================================
  * 4. The "C DNA": deterministic memory arena + byte buffers
@@ -322,6 +653,9 @@ function pyhp_type_name($v): string {
     if (is_string($v)) return 'string';
     if ($v instanceof PyList) return 'list';
     if ($v instanceof PyDict) return 'dict';
+    if ($v instanceof PyBigInt) return 'int';
+    if ($v instanceof PyHPView) return $v->kind === 'range' ? 'range' : $v->kind;
+    if ($v instanceof PyHPGenerator) return 'generator';
     if ($v instanceof PyHPBuffer) return 'buffer';
     if ($v instanceof PyHPArena) return 'arena';
     if ($v instanceof InterpFunc) return 'function';
@@ -345,10 +679,12 @@ function pyhp_type_name($v): string {
 function pyhp_truthy($v): bool {
     if ($v === null) return false;
     if (is_bool($v)) return $v;
+    if ($v instanceof PyBigInt) return $v->dec !== '0';
     if (is_int($v) || is_float($v)) return $v != 0;
     if (is_string($v)) return $v !== '';
     if ($v instanceof PyList) return count($v->a) > 0;
     if ($v instanceof PyDict) return count($v->d) > 0;
+    if ($v instanceof PyHPView && $v->kind === 'range') return $v->rangeLen() != 0;   // like Python's range.__bool__
     return true;
 }
 
@@ -386,7 +722,7 @@ function pyhp_format($v, string $spec): string {
     $prec = ($m['prec'] ?? '') !== '' ? (int)$m['prec'] : null;
     $type = $m['type'] ?? '';
 
-    $isNum = is_int($v) || is_float($v) || is_bool($v);
+    $isNum = is_int($v) || is_float($v) || is_bool($v) || $v instanceof PyBigInt;
     $body = ''; $neg = false; $prefix = ''; $signStr = ''; $zeroPad = false;
     if ($type === 's' || $type === 'c' || ($type === '' && !($isNum && !is_bool($v)))) {
         // string-ish presentation (str, char, null, bool, and type 's' on anything)
@@ -410,19 +746,25 @@ function pyhp_format($v, string $spec): string {
         if ($align === null) $align = '<';
     } else {
         if (!$isNum) throw new PyHPTypeError("unsupported value for format spec '{$spec}'");
-        $f = (float)$v; $i = (int)round($f);
+        $f = $v instanceof PyBigInt ? pyhp_big_to_float($v) : (float)$v;   // OverflowError past float range (like Python)
+        $i = (int)round($f);
         $neg = $f < 0 || ($f == 0.0 && strpos((string)$v, '-') === 0);
         $af = abs($f); $ai = abs($i);
         $plainType = ($type === '' || $type === 'n');
-        if ($type === 'd' || ($type === '' && is_int($v))) {
+        if ($type === 'd' || ($type === '' && (is_int($v) || $v instanceof PyBigInt))) {
             if (is_float($v)) {
                 throw new PyHPTypeError("unknown format code 'd' for float — use :f or :g");
             }
-            $body = (string)$ai;
+            $body = $v instanceof PyBigInt ? ltrim($v->dec, '-') : (string)$ai;
         } elseif ($type === 'b' || $type === 'o' || $type === 'x' || $type === 'X') {
             if ($grp) throw new PyHPError("cannot use ',' with format type '{$type}'");
-            $digits = $type === 'b' ? decbin($ai) : ($type === 'o' ? decoct($ai) : dechex($ai));
-            if ($type === 'X') $digits = strtoupper($digits);
+            if ($v instanceof PyBigInt) {
+                $digits = PyBigMath::toBase(ltrim($v->dec, '-'), ['b' => 2, 'o' => 8, 'x' => 16, 'X' => 16][$type]);
+                if ($type === 'X') $digits = strtoupper($digits);
+            } else {
+                $digits = $type === 'b' ? decbin($ai) : ($type === 'o' ? decoct($ai) : dechex($ai));
+                if ($type === 'X') $digits = strtoupper($digits);
+            }
             $body = $digits;
             if ($alt) $prefix = $type === 'b' ? '0b' : ($type === 'o' ? '0o' : ($type === 'X' ? '0X' : '0x'));
         } elseif ($type === 'f' || $type === 'F') {
@@ -534,6 +876,18 @@ function pyhp_tostr($v): string {
     if (is_int($v)) return (string)$v;
     if (is_float($v)) return pyhp_num_str($v);
     if (is_string($v)) return $v;
+    if ($v instanceof PyBigInt) return $v->dec;
+    if ($v instanceof PyHPView) {
+        if ($v->kind === 'range') {
+            [$s, $e, $st] = [$v->args[0], $v->args[1], $v->args[2]];
+            $base = 'range(' . pyhp_tostr($s) . ', ' . pyhp_tostr($e);
+            return ($st === 1 && !($st instanceof PyBigInt)) || ($st instanceof PyBigInt && $st->dec === '1')
+                ? $base . ')'
+                : $base . ', ' . pyhp_tostr($st) . ')';
+        }
+        return "<{$v->kind} object>";
+    }
+    if ($v instanceof PyHPGenerator) return "<generator object {$v->fnName}>";
     if ($v instanceof PyList) {
         $parts = array_map(fn($x) => pyhp_repr($x), $v->a);
         return '[' . implode(', ', $parts) . ']';
@@ -566,6 +920,338 @@ function pyhp_tostr($v): string {
 }
 
 /* =========================================================================
+ * 5b. Big integers — arbitrary-precision ints with Python promotion rules
+ *
+ * Any int operation that overflows 64-bit promotes to PyBigInt, so PyHP
+ * behaves like Python: `2 ** 100` is exact, `int("999...9")` never rounds,
+ * int literals beyond 64-bit parse exactly. ext/gmp is used when present
+ * (fast path); otherwise a pure-PHP base-1e9 limb implementation runs with
+ * identical results. Bitwise ops on big values need gmp (two's-complement
+ * semantics for negatives); the fallback raises a clear error instead.
+ * -------------------------------------------------------------------- */
+
+final class PyBigInt {
+    public string $dec;   // canonical form: "0" | -?[1-9][0-9]*
+    public function __construct(string $dec) { $this->dec = pyhp_big_canon($dec); }
+    public function __toString(): string { return $this->dec; }
+    public static function __set_state(array $a): self { return new self($a['dec']); }
+}
+
+function pyhp_big_canon(string $s): string {
+    $s = trim($s);
+    if (!preg_match('/^[+-]?[0-9]+$/', $s)) {
+        throw new PyHPValueError("invalid big-int literal '{$s}'");
+    }
+    $neg = $s[0] === '-';
+    $s = ltrim($s, '+-');
+    $s = ltrim($s, '0');
+    if ($s === '') return '0';
+    return ($neg ? '-' : '') . $s;
+}
+
+function pyhp_is_big($v): bool { return $v instanceof PyBigInt; }
+
+/** Factory used by transpiled code for big-int literals: pyhp_big("12676506..."). */
+function pyhp_big(string $dec): PyBigInt { return new PyBigInt($dec); }
+
+/** Numeric without floats: PHP int, bool, or PyBigInt. */
+function pyhp_int_like($v): bool { return is_int($v) || is_bool($v) || $v instanceof PyBigInt; }
+
+function pyhp_to_big($v): PyBigInt {
+    if ($v instanceof PyBigInt) return $v;
+    if (is_bool($v)) return new PyBigInt($v ? '1' : '0');
+    if (is_int($v)) return new PyBigInt((string)$v);
+    throw new PyHPTypeError('expected an int, got ' . pyhp_type_name($v));
+}
+
+/** Exact float conversion; OverflowError past float range (like Python). */
+function pyhp_big_to_float(PyBigInt $x): float {
+    $f = (float)$x->dec;
+    if (is_infinite($f)) throw new PyHPOverflowError('int too large to convert to float');
+    return $f;
+}
+
+function pyhp_big_is_gmp(): bool { return function_exists('gmp_init'); }
+
+/** Does this canonical decimal string fit in a PHP int? */
+function pyhp_big_fits_int(string $dec): bool {
+    if ($dec[0] === '-') {
+        $m = substr($dec, 1);
+        return strlen($m) < 19 || (strlen($m) === 19 && strcmp($m, '9223372036854775808') <= 0);
+    }
+    return strlen($dec) < 19 || (strlen($dec) === 19 && strcmp($dec, '9223372036854775807') <= 0);
+}
+
+/** Pure-PHP big-int core: base-1e9 little-endian limbs over magnitudes.
+ *  Used whenever ext/gmp is unavailable. */
+final class PyBigMath {
+    const BASE = 1000000000;
+
+    /** canonical dec -> [sign(-1|1), little-endian limbs (no leading zeros)] */
+    public static function limbs(string $dec): array {
+        $neg = $dec[0] === '-';
+        if ($neg) $dec = substr($dec, 1);
+        $out = [];
+        for ($i = strlen($dec); $i > 0; $i -= 9) {
+            $out[] = (int)substr($dec, max(0, $i - 9), $i - max(0, $i - 9));
+        }
+        while (count($out) > 1 && end($out) === 0) array_pop($out);
+        return [$neg ? -1 : 1, $out];
+    }
+
+    public static function dec(array $limbs, int $sign): string {
+        while (count($limbs) > 1 && end($limbs) === 0) array_pop($limbs);
+        if (count($limbs) === 1 && $limbs[0] === 0) return '0';
+        $s = (string)$limbs[count($limbs) - 1];
+        for ($i = count($limbs) - 2; $i >= 0; $i--) { $s .= sprintf('%09d', $limbs[$i]); }
+        return ($sign < 0 ? '-' : '') . $s;
+    }
+
+    public static function cmp(array $a, array $b): int {
+        if (count($a) !== count($b)) return count($a) <=> count($b);
+        for ($i = count($a) - 1; $i >= 0; $i--) {
+            if ($a[$i] !== $b[$i]) return $a[$i] <=> $b[$i];
+        }
+        return 0;
+    }
+
+    public static function add(array $a, array $b): array {
+        $n = max(count($a), count($b));
+        $out = []; $carry = 0;
+        for ($i = 0; $i < $n; $i++) {
+            $s = ($a[$i] ?? 0) + ($b[$i] ?? 0) + $carry;
+            $out[] = $s % self::BASE;
+            $carry = intdiv($s, self::BASE);
+        }
+        if ($carry > 0) $out[] = $carry;
+        return $out;
+    }
+
+    /** a - b on magnitudes; requires a >= b. */
+    public static function sub(array $a, array $b): array {
+        $out = []; $borrow = 0;
+        for ($i = 0; $i < count($a); $i++) {
+            $d = $a[$i] - ($b[$i] ?? 0) - $borrow;
+            if ($d < 0) { $d += self::BASE; $borrow = 1; } else { $borrow = 0; }
+            $out[] = $d;
+        }
+        while (count($out) > 1 && end($out) === 0) array_pop($out);
+        return $out;
+    }
+
+    public static function mul(array $a, array $b): array {
+        if ((count($a) === 1 && $a[0] === 0) || (count($b) === 1 && $b[0] === 0)) return [0];
+        $n = count($a); $m = count($b);
+        $out = array_fill(0, $n + $m, 0);
+        for ($i = 0; $i < $n; $i++) {
+            if ($a[$i] === 0) continue;
+            $carry = 0;
+            for ($j = 0; $j < $m; $j++) {
+                $t = $out[$i + $j] + $a[$i] * $b[$j] + $carry;
+                $out[$i + $j] = $t % self::BASE;
+                $carry = intdiv($t, self::BASE);
+            }
+            $k = $i + $m;
+            while ($carry > 0) {
+                $t = $out[$k] + $carry;
+                $out[$k] = $t % self::BASE;
+                $carry = intdiv($t, self::BASE);
+                $k++;
+            }
+        }
+        while (count($out) > 1 && end($out) === 0) array_pop($out);
+        return $out;
+    }
+
+    /** Schoolbook long division on magnitudes: a / b -> [quotient, remainder]. */
+    public static function divmod(array $a, array $b): array {
+        $c = self::cmp($a, $b);
+        if ($c < 0) return [[0], $a];
+        if ($c === 0) return [[1], [0]];
+        if (count($b) === 1 && $b[0] === 0) throw new PyHPZeroDivisionError('big-int division by zero');
+        $bt = $b[count($b) - 1];
+        $rem = [0];
+        $qout = [];
+        for ($i = count($a) - 1; $i >= 0; $i--) {
+            array_unshift($rem, $a[$i]); // rem = rem * BASE + a[i]
+            while (count($rem) > 1 && end($rem) === 0) array_pop($rem);
+            if (self::cmp($rem, $b) < 0) { $qout[] = 0; continue; }
+            $rlen = count($rem);
+            $hi = $rlen >= 2 ? $rem[$rlen - 1] * self::BASE + $rem[$rlen - 2] : $rem[$rlen - 1];
+            $qhat = intdiv($hi, $bt);
+            if ($qhat >= self::BASE) $qhat = self::BASE - 1;
+            // correct the estimate in both directions (cheap: a few steps)
+            while ($qhat > 0 && self::cmp(self::mul($b, [$qhat]), $rem) > 0) { $qhat--; }
+            while (self::cmp(self::mul($b, [$qhat + 1]), $rem) <= 0) { $qhat++; }
+            $qout[] = $qhat;
+            $rem = self::sub($rem, self::mul($b, [$qhat]));
+        }
+        $q = array_reverse($qout);
+        while (count($q) > 1 && end($q) === 0) array_pop($q);
+        return [$q, $rem];
+    }
+
+    /** a ** e with a non-negative int exponent. */
+    public static function powInt(array $a, int $e): array {
+        $out = [1];
+        $base = $a;
+        while ($e > 0) {
+            if ($e & 1) $out = self::mul($out, $base);
+            $e >>= 1;
+            if ($e > 0) $base = self::mul($base, $base);
+        }
+        return $out;
+    }
+
+    /** a ** e with a big exponent (halve the exponent step by step). */
+    public static function powBig(array $a, array $e): array {
+        $out = [1];
+        $base = $a;
+        $e2 = $e;
+        while (!(count($e2) === 1 && $e2[0] === 0)) {
+            [$e2, $bit] = self::divmod($e2, [2]);
+            if ($bit[0] & 1) $out = self::mul($out, $base);
+            if (!(count($e2) === 1 && $e2[0] === 0)) $base = self::mul($base, $base);
+        }
+        return $out;
+    }
+
+    /** Canonical dec -> digit string in base 2/8/16 (no sign, no prefix). */
+    public static function toBase(string $dec, int $base): string {
+        [$sign, $a] = self::limbs($dec);
+        if (count($a) === 1 && $a[0] === 0) return '0';
+        $digits = '0123456789abcdef';
+        $out = '';
+        while (!(count($a) === 1 && $a[0] === 0)) {
+            [$a, $r] = self::divmod($a, [$base]);
+            $out = $digits[$r[0]] . $out;
+        }
+        return $out;
+    }
+
+    /** Digit string in base 2..16 -> canonical dec string. */
+    public static function fromBase(string $digits, int $base): string {
+        $acc = [0];
+        $B = [$base];
+        foreach (str_split(strtolower(trim($digits))) as $ch) {
+            $d = ctype_digit($ch) ? ord($ch) - 48 : ord($ch) - 87;
+            if ($d < 0 || $d >= $base) {
+                throw new PyHPValueError("invalid digit '{$ch}' for base {$base}");
+            }
+            $acc = self::add(self::mul($acc, $B), [$d]);
+        }
+        return self::dec($acc, 1);
+    }
+}
+
+function pyhp_big_gmp(PyBigInt $x) { return gmp_init($x->dec); }
+function pyhp_big_from_gmp($g): PyBigInt { return new PyBigInt(gmp_strval($g)); }
+
+function pyhp_big_add(PyBigInt $a, PyBigInt $b): PyBigInt {
+    if (pyhp_big_is_gmp()) return pyhp_big_from_gmp(gmp_add(pyhp_big_gmp($a), pyhp_big_gmp($b)));
+    [$sa, $la] = PyBigMath::limbs($a->dec);
+    [$sb, $lb] = PyBigMath::limbs($b->dec);
+    if ($sa === $sb) return new PyBigInt(PyBigMath::dec(PyBigMath::add($la, $lb), $sa));
+    $c = PyBigMath::cmp($la, $lb);
+    if ($c === 0) return new PyBigInt('0');
+    return $c > 0
+        ? new PyBigInt(PyBigMath::dec(PyBigMath::sub($la, $lb), $sa))
+        : new PyBigInt(PyBigMath::dec(PyBigMath::sub($lb, $la), $sb));
+}
+
+function pyhp_big_sub(PyBigInt $a, PyBigInt $b): PyBigInt {
+    return pyhp_big_add($a, pyhp_big_neg($b));
+}
+
+function pyhp_big_neg(PyBigInt $a): PyBigInt {
+    return new PyBigInt($a->dec === '0' ? '0' : ($a->dec[0] === '-' ? substr($a->dec, 1) : '-' . $a->dec));
+}
+
+function pyhp_big_mul(PyBigInt $a, PyBigInt $b): PyBigInt {
+    if (pyhp_big_is_gmp()) return pyhp_big_from_gmp(gmp_mul(pyhp_big_gmp($a), pyhp_big_gmp($b)));
+    [$sa, $la] = PyBigMath::limbs($a->dec);
+    [$sb, $lb] = PyBigMath::limbs($b->dec);
+    return new PyBigInt(PyBigMath::dec(PyBigMath::mul($la, $lb), $sa * $sb));
+}
+
+function pyhp_big_cmp(PyBigInt $a, PyBigInt $b): int {
+    if (pyhp_big_is_gmp()) return gmp_cmp(pyhp_big_gmp($a), pyhp_big_gmp($b));
+    [$sa, $la] = PyBigMath::limbs($a->dec);
+    [$sb, $lb] = PyBigMath::limbs($b->dec);
+    if ($sa !== $sb) return $sa <=> $sb;
+    $c = PyBigMath::cmp($la, $lb);
+    return $sa < 0 ? -$c : $c;
+}
+
+/** floor divmod: a = q*b + r with Python sign semantics -> [PyBigInt, PyBigInt] */
+function pyhp_big_divmod(PyBigInt $a, PyBigInt $b): array {
+    if ($b->dec === '0') throw new PyHPZeroDivisionError('division by zero');
+    if (pyhp_big_is_gmp()) {
+        $ga = pyhp_big_gmp($a); $gb = pyhp_big_gmp($b);
+        $q = gmp_div_q($ga, $gb, GMP_ROUND_MINUSINF);
+        $r = gmp_sub($ga, gmp_mul($q, $gb));
+        return [pyhp_big_from_gmp($q), pyhp_big_from_gmp($r)];
+    }
+    [$sa, $la] = PyBigMath::limbs($a->dec);
+    [$sb, $lb] = PyBigMath::limbs($b->dec);
+    [$t, $rm] = PyBigMath::divmod($la, $lb);
+    $rZero = count($rm) === 1 && $rm[0] === 0;
+    if ($sa === $sb) {
+        // same signs: floor == trunc; remainder carries a's (== b's) sign
+        $q = new PyBigInt(PyBigMath::dec($t, 1));
+        $r = $rZero ? new PyBigInt('0') : new PyBigInt(PyBigMath::dec($rm, $sb));
+        return [$q, $r];
+    }
+    // different signs: floor = trunc + 1 unless exact; |r| = bmag - rmag
+    $q = $rZero ? new PyBigInt('0') : new PyBigInt(PyBigMath::dec(PyBigMath::add($t, [1]), -1));
+    $r = $rZero ? new PyBigInt('0') : new PyBigInt(PyBigMath::dec(PyBigMath::sub($lb, $rm), $sb));
+    return [$q, $r];
+}
+
+function pyhp_big_mod(PyBigInt $a, PyBigInt $b): PyBigInt {
+    return pyhp_big_divmod($a, $b)[1];
+}
+
+/** Big-int power. Exponent must be a non-negative int-ish value. */
+function pyhp_big_pow(PyBigInt $a, $e): PyBigInt {
+    if ($e instanceof PyBigInt) {
+        if ($e->dec[0] === '-') throw new PyHPZeroDivisionError('0.0 cannot be raised to a negative power');
+        if (pyhp_big_is_gmp()) {
+            // exponentiate by squaring through gmp (exponent may exceed int range)
+            $base = pyhp_big_gmp($a); $acc = gmp_init('1');
+            $two = gmp_init('2');
+            while (gmp_cmp($e, '0') > 0) {
+                [$eq, $bit] = pyhp_big_divmod_e($e);
+                if (gmp_strval($bit) === '1') $acc = gmp_mul($acc, $base);
+                if (gmp_cmp($eq, '0') > 0) $base = gmp_mul($base, $base);
+                $e = pyhp_big_from_gmp($eq);
+            }
+            return pyhp_big_from_gmp($acc);
+        }
+        [$sa, $la] = PyBigMath::limbs($a->dec);
+        [$se, $le] = PyBigMath::limbs($e->dec);
+        $neg = $sa < 0 && PyBigMath::divmod($le, [2])[1][0] === 1;
+        return new PyBigInt(PyBigMath::dec(PyBigMath::powBig($la, $le), $neg ? -1 : 1));
+    }
+    $i = is_bool($e) ? (int)$e : (int)$e;
+    if ($i < 0) throw new PyHPZeroDivisionError('0.0 cannot be raised to a negative power');
+    if ($i > 100000000) throw new PyHPValueError('pow(): exponent too large');
+    if (pyhp_big_is_gmp()) return pyhp_big_from_gmp(gmp_pow(pyhp_big_gmp($a), $i));
+    [$sa, $la] = PyBigMath::limbs($a->dec);
+    $neg = $sa < 0 && ($i & 1) === 1;
+    return new PyBigInt(PyBigMath::dec(PyBigMath::powInt($la, $i), $neg ? -1 : 1));
+}
+
+/** helper: divmod a big by 2 for the gmp squaring loop */
+function pyhp_big_divmod_e($e): array {
+    $q = gmp_div_q($e, 2, GMP_ROUND_MINUSINF);
+    $r = gmp_sub($e, gmp_mul($q, 2));
+    return [$q, $r];
+}
+
+function pyhp_big_str(PyBigInt $x): string { return $x->dec; }
+
+/* =========================================================================
  * 6. Arithmetic / comparison operators
  * ========================================================================= */
 
@@ -573,19 +1259,71 @@ function pyhp_is_num($v): bool { return is_int($v) || is_float($v) || is_bool($v
 
 function pyhp_num($v) { return is_bool($v) ? (int)$v : $v; }
 
+function pyhp_big_or_num($v): bool { return pyhp_is_num($v) || $v instanceof PyBigInt; }
+
 function pyhp_add($a, $b) {
-    if (pyhp_is_num($a) && pyhp_is_num($b)) return pyhp_num($a) + pyhp_num($b);
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        if (pyhp_int_like($a) && pyhp_int_like($b)) return pyhp_big_add(pyhp_to_big($a), pyhp_to_big($b));
+        if (pyhp_big_or_num($a) && pyhp_big_or_num($b)) {
+            $fa = $a instanceof PyBigInt ? pyhp_big_to_float($a) : pyhp_num($a);
+            $fb = $b instanceof PyBigInt ? pyhp_big_to_float($b) : pyhp_num($b);
+            return $fa + $fb;
+        }
+    }
+    if (pyhp_is_num($a) && pyhp_is_num($b)) {
+        $x = pyhp_num($a); $y = pyhp_num($b);
+        if (is_int($x) && is_int($y)) {
+            $r = $x + $y;
+            if (is_float($r)) {   // 64-bit overflow -> promote to big-int (Python style)
+                return pyhp_big_add(new PyBigInt((string)$x), new PyBigInt((string)$y));
+            }
+            return $r;
+        }
+        return $x + $y;
+    }
     if (is_string($a) || is_string($b)) return pyhp_tostr($a) . pyhp_tostr($b);
     if ($a instanceof PyList && $b instanceof PyList) return new PyList(array_merge($a->a, $b->a));
     if ($a instanceof PyDict && $b instanceof PyDict) return new PyDict(array_replace($a->d, $b->d));
     throw new PyHPTypeError("unsupported operand type(s) for +: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
 }
 function pyhp_sub($a, $b) {
-    if (pyhp_is_num($a) && pyhp_is_num($b)) return pyhp_num($a) - pyhp_num($b);
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        if (pyhp_int_like($a) && pyhp_int_like($b)) return pyhp_big_sub(pyhp_to_big($a), pyhp_to_big($b));
+        if (pyhp_big_or_num($a) && pyhp_big_or_num($b)) {
+            $fa = $a instanceof PyBigInt ? pyhp_big_to_float($a) : pyhp_num($a);
+            $fb = $b instanceof PyBigInt ? pyhp_big_to_float($b) : pyhp_num($b);
+            return $fa - $fb;
+        }
+    }
+    if (pyhp_is_num($a) && pyhp_is_num($b)) {
+        $x = pyhp_num($a); $y = pyhp_num($b);
+        if (is_int($x) && is_int($y)) {
+            $r = $x - $y;
+            if (is_float($r)) return pyhp_big_sub(new PyBigInt((string)$x), new PyBigInt((string)$y));
+            return $r;
+        }
+        return $x - $y;
+    }
     throw new PyHPTypeError("unsupported operand type(s) for -: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
 }
 function pyhp_mul($a, $b) {
-    if (pyhp_is_num($a) && pyhp_is_num($b)) return pyhp_num($a) * pyhp_num($b);
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        if (pyhp_int_like($a) && pyhp_int_like($b)) return pyhp_big_mul(pyhp_to_big($a), pyhp_to_big($b));
+        if (pyhp_big_or_num($a) && pyhp_big_or_num($b)) {
+            $fa = $a instanceof PyBigInt ? pyhp_big_to_float($a) : pyhp_num($a);
+            $fb = $b instanceof PyBigInt ? pyhp_big_to_float($b) : pyhp_num($b);
+            return $fa * $fb;
+        }
+    }
+    if (pyhp_is_num($a) && pyhp_is_num($b)) {
+        $x = pyhp_num($a); $y = pyhp_num($b);
+        if (is_int($x) && is_int($y)) {
+            $r = $x * $y;
+            if (is_float($r)) return pyhp_big_mul(new PyBigInt((string)$x), new PyBigInt((string)$y));
+            return $r;
+        }
+        return $x * $y;
+    }
     if (is_string($a) && pyhp_is_num($b)) return str_repeat($a, (int)pyhp_num($b));
     if (pyhp_is_num($a) && is_string($b)) return str_repeat($b, (int)pyhp_num($a));
     if ($a instanceof PyList && pyhp_is_num($b)) {
@@ -597,6 +1335,15 @@ function pyhp_mul($a, $b) {
     throw new PyHPTypeError("unsupported operand type(s) for *: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
 }
 function pyhp_div($a, $b) {
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        if (!pyhp_big_or_num($a) || !pyhp_big_or_num($b)) {
+            throw new PyHPTypeError("unsupported operand type(s) for /: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
+        }
+        $fa = $a instanceof PyBigInt ? pyhp_big_to_float($a) : pyhp_num($a);
+        $fb = $b instanceof PyBigInt ? pyhp_big_to_float($b) : pyhp_num($b);
+        if ($fb == 0) throw new PyHPZeroDivisionError('division by zero');
+        return $fa / $fb;
+    }
     if (pyhp_is_num($a) && pyhp_is_num($b)) {
         $x = pyhp_num($a); $y = pyhp_num($b);
         if ($y == 0) throw new PyHPZeroDivisionError('division by zero');
@@ -605,6 +1352,19 @@ function pyhp_div($a, $b) {
     throw new PyHPTypeError("unsupported operand type(s) for /: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
 }
 function pyhp_mod($a, $b) {
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        if (pyhp_int_like($a) && pyhp_int_like($b)) {
+            $ba = pyhp_to_big($a); $bb = pyhp_to_big($b);
+            if ($bb->dec === '0') throw new PyHPZeroDivisionError('modulo by zero');
+            return pyhp_big_mod($ba, $bb);
+        }
+        if (pyhp_big_or_num($a) && pyhp_big_or_num($b)) {
+            $x = $a instanceof PyBigInt ? pyhp_big_to_float($a) : pyhp_num($a);
+            $y = $b instanceof PyBigInt ? pyhp_big_to_float($b) : pyhp_num($b);
+            if ($y == 0) throw new PyHPZeroDivisionError('modulo by zero');
+            return $x - $y * floor($x / $y);
+        }
+    }
     if (pyhp_is_num($a) && pyhp_is_num($b)) {
         $x = pyhp_num($a); $y = pyhp_num($b);
         if ($y == 0) throw new PyHPZeroDivisionError('modulo by zero');
@@ -620,7 +1380,41 @@ function pyhp_mod($a, $b) {
     throw new PyHPTypeError("unsupported operand type(s) for %: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
 }
 function pyhp_pow($a, $b) {
-    if (pyhp_is_num($a) && pyhp_is_num($b)) return pyhp_num($a) ** pyhp_num($b);
+    $aBig = $a instanceof PyBigInt; $bBig = $b instanceof PyBigInt;
+    if ($aBig || $bBig) {
+        if (!pyhp_int_like($a) && !pyhp_is_num($a)) {
+            throw new PyHPTypeError("unsupported operand type(s) for **: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
+        }
+        if (pyhp_int_like($a) && pyhp_int_like($b)) {
+            $bNeg = $bBig ? $b->dec[0] === '-' : pyhp_num($b) < 0;
+            if ($bNeg) {
+                $aZero = $aBig ? $a->dec === '0' : (pyhp_num($a) == 0);
+                if ($aZero) {
+                    throw new PyHPZeroDivisionError('0.0 cannot be raised to a negative power');
+                }
+                $fa = $aBig ? pyhp_big_to_float($a) : (float)pyhp_num($a);
+                $fb = $bBig ? pyhp_big_to_float($b) : (float)pyhp_num($b);
+                return $fa ** $fb;
+            }
+            return pyhp_big_pow(pyhp_to_big($a), pyhp_to_big($b));
+        }
+        $fa = $a instanceof PyBigInt ? pyhp_big_to_float($a) : pyhp_num($a);
+        $fb = $b instanceof PyBigInt ? pyhp_big_to_float($b) : pyhp_num($b);
+        return $fa ** $fb;
+    }
+    if (pyhp_is_num($a) && pyhp_is_num($b)) {
+        $x = pyhp_num($a); $y = pyhp_num($b);
+        if (is_int($x) && is_int($y)) {
+            if ($y < 0) {
+                if ($x === 0) throw new PyHPZeroDivisionError('0.0 cannot be raised to a negative power');
+                return (float)$x ** $y;
+            }
+            $r = $x ** $y;
+            if (is_float($r)) return pyhp_big_pow(new PyBigInt((string)$x), $y);
+            return $r;
+        }
+        return pyhp_num($a) ** pyhp_num($b);
+    }
     throw new PyHPTypeError("unsupported operand type(s) for **: '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
 }
 function pyhp_bitcheck($a, $op) {
@@ -630,21 +1424,79 @@ function pyhp_bitcheck($a, $op) {
     }
     return $a;
 }
-function pyhp_bitand($a, $b) { return pyhp_bitcheck($a, 'AND (&)') & pyhp_bitcheck($b, 'AND (&)'); }
-function pyhp_bitor($a, $b)  { return pyhp_bitcheck($a, 'OR (|)') | pyhp_bitcheck($b, 'OR (|)'); }
-function pyhp_bitxor($a, $b) { return pyhp_bitcheck($a, 'XOR (^)') ^ pyhp_bitcheck($b, 'XOR (^)'); }
+
+/** Big-int bitwise (two's-complement semantics like Python) — gmp only. */
+function pyhp_big_bitargs($a, $b, string $op): array {
+    if (!pyhp_big_is_gmp()) {
+        throw new PyHPTypeError("big-int {$op} needs the gmp PHP extension (arithmetic on big ints works without it)");
+    }
+    if (!pyhp_int_like($a) || !pyhp_int_like($b)) {
+        throw new PyHPTypeError("bitwise {$op} requires int operands, got '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
+    }
+    return [pyhp_big_gmp(pyhp_to_big($a)), pyhp_big_gmp(pyhp_to_big($b))];
+}
+function pyhp_bitand($a, $b) {
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        [$ga, $gb] = pyhp_big_bitargs($a, $b, 'AND (&)'); return pyhp_big_from_gmp(gmp_and($ga, $gb));
+    }
+    return pyhp_bitcheck($a, 'AND (&)') & pyhp_bitcheck($b, 'AND (&)');
+}
+function pyhp_bitor($a, $b) {
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        [$ga, $gb] = pyhp_big_bitargs($a, $b, 'OR (|)'); return pyhp_big_from_gmp(gmp_or($ga, $gb));
+    }
+    return pyhp_bitcheck($a, 'OR (|)') | pyhp_bitcheck($b, 'OR (|)');
+}
+function pyhp_bitxor($a, $b) {
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        [$ga, $gb] = pyhp_big_bitargs($a, $b, 'XOR (^)'); return pyhp_big_from_gmp(gmp_xor($ga, $gb));
+    }
+    return pyhp_bitcheck($a, 'XOR (^)') ^ pyhp_bitcheck($b, 'XOR (^)');
+}
+function pyhp_big_shiftcount($b, string $op): int {
+    if ($b instanceof PyBigInt) {
+        if (!pyhp_big_fits_int($b->dec)) throw new PyHPValueError('shift count too large');
+        return (int)$b->dec;
+    }
+    return pyhp_bitcheck($b, "shift ({$op})");
+}
 function pyhp_lshift($a, $b) {
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        [$ga] = pyhp_big_bitargs($a, $a, 'shift (<<)');
+        $n = pyhp_big_shiftcount($b, '<<');
+        if ($n < 0) throw new PyHPValueError('negative shift count');
+        return pyhp_big_from_gmp(gmp_shiftl($ga, $n));
+    }
     $x = pyhp_bitcheck($a, 'shift (<<)'); $n = pyhp_bitcheck($b, 'shift (<<)');
     if ($n < 0) throw new PyHPValueError('negative shift count');
     return $x << $n;
 }
 function pyhp_rshift($a, $b) {
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        [$ga] = pyhp_big_bitargs($a, $a, 'shift (>>)');
+        $n = pyhp_big_shiftcount($b, '>>');
+        if ($n < 0) throw new PyHPValueError('negative shift count');
+        return pyhp_big_from_gmp(gmp_shiftr($ga, $n));
+    }
     $x = pyhp_bitcheck($a, 'shift (>>)'); $n = pyhp_bitcheck($b, 'shift (>>)');
     if ($n < 0) throw new PyHPValueError('negative shift count');
     return $x >> $n;
 }
-function pyhp_bitnot($a) { return ~pyhp_bitcheck($a, 'NOT (~)'); }
+function pyhp_bitnot($a) {
+    if ($a instanceof PyBigInt) {
+        if (!pyhp_big_is_gmp()) {
+            throw new PyHPTypeError('big-int bitwise NOT (~) needs the gmp PHP extension');
+        }
+        return pyhp_big_from_gmp(gmp_com(pyhp_big_gmp($a)));
+    }
+    return ~pyhp_bitcheck($a, 'NOT (~)');
+}
 function pyhp_neg($a) {
+    if ($a instanceof PyBigInt) return pyhp_big_neg($a);
+    if (is_int($a)) {
+        if ($a === PHP_INT_MIN) return new PyBigInt('9223372036854775808');  // -PHP_INT_MIN overflows 64-bit
+        return -$a;
+    }
     if (pyhp_is_num($a)) return -pyhp_num($a);
     throw new PyHPTypeError("bad operand type for unary -: '" . pyhp_type_name($a) . "'");
 }
@@ -663,6 +1515,17 @@ function pyhp_eq($a, $b): bool {
         }
         return true;
     }
+    if ($a instanceof PyBigInt && $b instanceof PyBigInt) return $a->dec === $b->dec;
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        $big = $a instanceof PyBigInt ? $a : $b;
+        $other = $a instanceof PyBigInt ? $b : $a;
+        if (pyhp_int_like($other)) return $big->dec === pyhp_to_big($other)->dec;
+        if (is_float($other)) {
+            $f = pyhp_big_to_float($big);   // OverflowError propagates like Python's ==
+            return $f == $other;
+        }
+        return false;
+    }
     if (is_object($a) || is_object($b)) return $a === $b;
     if (is_bool($a) || is_bool($b)) {
         if (pyhp_is_num($a) && pyhp_is_num($b)) return pyhp_num($a) == pyhp_num($b);
@@ -677,6 +1540,31 @@ function pyhp_eq($a, $b): bool {
 function pyhp_compare($a, $b): int {
     if (is_bool($a)) $a = (int)$a;
     if (is_bool($b)) $b = (int)$b;
+    if ($a instanceof PyBigInt || $b instanceof PyBigInt) {
+        if ($a instanceof PyBigInt && $b instanceof PyBigInt) return pyhp_big_cmp($a, $b);
+        $big = $a instanceof PyBigInt ? $a : $b;
+        $other = $a instanceof PyBigInt ? $b : $a;
+        $c = 0;
+        if (pyhp_int_like($other)) {
+            $c = pyhp_big_cmp($big, pyhp_to_big($other));
+        } elseif (is_float($other)) {
+            if (is_infinite($other)) {
+                $c = $other > 0 ? -1 : 1;             // any finite int < +inf, > -inf
+            } elseif (is_nan($other)) {
+                throw new PyHPTypeError("'<' not supported between instances of 'int' and 'float'");
+            } else {
+                $f = (float)$big->dec;
+                if (is_infinite($f)) {
+                    $c = $big->dec[0] === '-' ? -1 : 1;  // beyond float range: exact sign decides
+                } else {
+                    $c = $f <=> $other;
+                }
+            }
+        } else {
+            throw new PyHPTypeError("'<' not supported between instances of '" . pyhp_type_name($a) . "' and '" . pyhp_type_name($b) . "'");
+        }
+        return $a instanceof PyBigInt ? $c : -$c;
+    }
     if (pyhp_is_num($a) && pyhp_is_num($b)) return pyhp_num($a) <=> pyhp_num($b);
     if (is_string($a) && is_string($b)) return strcmp($a, $b);
     if ($a instanceof PyList && $b instanceof PyList) {
@@ -691,6 +1579,38 @@ function pyhp_compare($a, $b): int {
 }
 
 function pyhp_in($needle, $hay): bool {
+    if ($hay instanceof PyHPView && $hay->kind === 'range') {
+        if (!pyhp_int_like($needle)) {
+            foreach ($hay->getIterator() as $x) { if (pyhp_eq($needle, $x)) return true; }
+            return false;
+        }
+        [$s, $e, $st] = [$hay->args[0], $hay->args[1], $hay->args[2]];
+        if ($s instanceof PyBigInt || $e instanceof PyBigInt || $st instanceof PyBigInt || $needle instanceof PyBigInt) {
+            $n = pyhp_to_big($needle);
+            $sb = pyhp_to_big($s);
+            $stb = pyhp_to_big($st);
+            $d = pyhp_big_sub($n, $sb);
+            $zero = new PyBigInt('0');
+            $negStep = $stb->dec[0] === '-';
+            if ($negStep) {
+                if (pyhp_big_cmp($n, $sb) > 0 || pyhp_big_cmp($n, pyhp_to_big($e)) <= 0) return false;
+            } else {
+                if (pyhp_big_cmp($n, $sb) < 0 || pyhp_big_cmp($n, pyhp_to_big($e)) >= 0) return false;
+            }
+            [$q, $r] = pyhp_big_divmod($d, $stb);
+            return $r->dec === '0';
+        }
+        if ($st > 0) {
+            if ($needle < $s || $needle >= $e) return false;
+            return ($needle - $s) % $st === 0;
+        }
+        if ($needle > $s || $needle <= $e) return false;
+        return ($s - $needle) % (-$st) === 0;
+    }
+    if ($hay instanceof PyHPView) {
+        foreach ($hay->getIterator() as $x) { if (pyhp_eq($needle, $x)) return true; }
+        return false;
+    }
     if ($hay instanceof PyList) {
         foreach ($hay->a as $x) { if (pyhp_eq($x, $needle)) return true; }
         return false;
@@ -722,6 +1642,11 @@ function pyhp_iter_values($v): array {
     if ($v instanceof PyList) return $v->a;
     if ($v instanceof PyDict) return array_keys($v->d);
     if (is_string($v)) return pyhp_chars($v);
+    if ($v instanceof PyHPView || $v instanceof PyHPGenerator) {
+        $out = [];
+        foreach ($v->getIterator() as $x) { $out[] = $x; }
+        return $out;
+    }
     // iterator protocol (transpiled classes, or interpreter instances via hook)
     if (is_object($v) && (method_exists($v, '__iter__') || method_exists($v, '__next__'))) {
         return pyhp_foreach($v);
@@ -752,6 +1677,11 @@ function pyhp_foreach($v): array {
     if ($v instanceof PyList) return array_values($v->a);
     if ($v instanceof PyDict) return $v->d;
     if (is_string($v)) return pyhp_chars($v);
+    if ($v instanceof PyHPView || $v instanceof PyHPGenerator) {
+        $out = [];
+        foreach ($v->getIterator() as $k => $x) { $out[$k] = $x; }
+        return $out;
+    }
     // iterator protocol for transpiled user classes: __iter__() -> __next__()
     if (is_object($v) && !($v instanceof Closure)) {
         $it = $v;
@@ -778,7 +1708,17 @@ function pyhp_foreach($v): array {
 
 function pyhp_guard_key($k) {
     if (is_int($k) || is_string($k)) return $k;
+    if ($k instanceof PyBigInt) return $k->dec;   // big-int dict keys round-trip as decimal strings
     throw new PyHPTypeError('dict keys must be int or string, got ' . pyhp_type_name($k));
+}
+
+/** Build a guarded PHP key => value map from a flat [k1, v1, k2, v2, ...] list. */
+function pyhp_dict_pairs(array $flat): array {
+    $out = [];
+    for ($i = 0; $i + 1 < count($flat); $i += 2) {
+        $out[pyhp_guard_key($flat[$i])] = $flat[$i + 1];
+    }
+    return $out;
 }
 
 function pyhp_get($c, $i) {
@@ -793,6 +1733,9 @@ function pyhp_get($c, $i) {
         $i = pyhp_guard_key($i);
         if (!array_key_exists($i, $c->d)) throw new PyHPKeyError('key not found: ' . pyhp_repr($i));
         return $c->d[$i];
+    }
+    if ($c instanceof PyHPView && $c->kind === 'range') {
+        return $c->rangeGet($i);
     }
     if ($c instanceof PyHPBuffer) {
         if (!is_int($i)) throw new PyHPTypeError('buffer indices must be int, got ' . pyhp_type_name($i));
@@ -836,7 +1779,50 @@ function pyhp_set($c, $i, $v): void {
 function pyhp_slice($c, $start, $stop, $step) {
     if ($c instanceof PyList)      { return new PyList(pyhp_slice_arr($c->a, $start, $stop, $step)); }
     if (is_string($c))             { return implode('', pyhp_slice_arr(pyhp_chars($c), $start, $stop, $step)); }
+    if ($c instanceof PyHPView && $c->kind === 'range') { return pyhp_range_slice($c, $start, $stop, $step); }
     throw new PyHPTypeError("'" . pyhp_type_name($c) . "' object is not sliceable");
+}
+
+/** Slice a lazy range view into another lazy range view (like Python). */
+function pyhp_range_slice(PyHPView $v, $start, $stop, $step): PyHPView {
+    [$s, , $st] = [$v->args[0], $v->args[1], $v->args[2]];
+    $stp = $step === null ? 1 : pyhp_range_int($step, 'range slice');
+    if ($stp === 0) throw new PyHPValueError('slice step cannot be zero');
+    $n = pyhp_to_big($v->rangeLen());
+    $S = pyhp_to_big($s);
+    $ST = pyhp_to_big($st);
+    $zero = new PyBigInt('0');
+    $one = new PyBigInt('1');
+    $clampLo = function ($x) use ($n, $zero) {   // max(0, min(x, n)) after negative shift
+        if (pyhp_big_cmp($x, $zero) < 0) $x = pyhp_big_add($n, $x);
+        if (pyhp_big_cmp($x, $zero) < 0) $x = $zero;
+        if (pyhp_big_cmp($x, $n) > 0) $x = $n;
+        return $x;
+    };
+    $clampHi = function ($x) use ($n, $zero) {   // min(x, n) for positive-step stops
+        if (pyhp_big_cmp($x, $n) > 0) $x = $n;
+        return $x;
+    };
+    if ($stp > 0) {
+        $si = $start === null ? $zero : $clampLo(pyhp_to_big($start));
+        $ei = $stop === null ? $n : $clampLo(pyhp_to_big($stop));
+    } else {
+        $si = $start === null ? pyhp_big_sub($n, $one) : $clampLo(pyhp_to_big($start));
+        if ($start !== null && pyhp_big_cmp(pyhp_to_big($start), pyhp_big_sub($n, $one)) > 0) {
+            $si = pyhp_big_sub($n, $one);
+        }
+        $ei = $stop === null ? pyhp_big_neg($one) : $clampLo(pyhp_to_big($stop));
+        if ($stop !== null && pyhp_big_cmp(pyhp_to_big($stop), pyhp_big_neg($one)) < 0) {
+            $ei = pyhp_big_neg($one);
+        }
+    }
+    $newS = pyhp_big_add($S, pyhp_big_mul($ST, $si));
+    $newE = pyhp_big_add($S, pyhp_big_mul($ST, $ei));
+    $newSt = pyhp_big_mul($ST, new PyBigInt((string)$stp));
+    $mk = function ($x) {
+        return pyhp_big_fits_int($x->dec) ? (int)$x->dec : $x;
+    };
+    return new PyHPView('range', [$mk($newS), $mk($newE), $mk($newSt)]);
 }
 
 function pyhp_slice_arr(array $a, $start, $stop, $step): array {
@@ -979,8 +1965,9 @@ function pyhp_strcast_arg($v, string $who): string {
 
 function pyhp_check_type($v, string $t, string $name) {
     switch ($t) {
-        case 'int':    if (!is_int($v))  throw new PyHPTypeError("type mismatch: cannot assign " . pyhp_type_name($v) . " to int variable '{$name}'"); break;
+        case 'int':    if (!is_int($v) && !($v instanceof PyBigInt))  throw new PyHPTypeError("type mismatch: cannot assign " . pyhp_type_name($v) . " to int variable '{$name}'"); break;
         case 'float':
+            if ($v instanceof PyBigInt) return pyhp_big_to_float($v);   // big-int widening, OverflowError past float range
             if (is_int($v)) return (float)$v;   // C-style widening int -> float
             if (!is_float($v)) throw new PyHPTypeError("type mismatch: cannot assign " . pyhp_type_name($v) . " to float variable '{$name}'");
             break;
@@ -1083,52 +2070,37 @@ function pyhp_builtins(): array {
             if (is_string($v)) return mb_strlen($v);
             if ($v instanceof PyList || $v instanceof PyDict) return count($v instanceof PyList ? $v->a : $v->d);
             if ($v instanceof PyHPBuffer) return $v->size();
+            if ($v instanceof PyHPView && $v->kind === 'range') return $v->rangeLen();   // exact, big included
             throw new PyHPTypeError("len() of unsupported type '" . pyhp_type_name($v) . "'");
         }, 1, 1],
         'range' => [function (...$a) {
             pyhp_reg_errcheck($a, 'range', 1, 3);
-            $vals = array_map(fn($x) => pyhp_range_int($x, 'range'), $a);
+            $vals = array_map(fn($x) => pyhp_range_bound($x, 'range'), $a);
             if (count($vals) === 1) { $s = 0; $e = $vals[0]; $st = 1; }
             elseif (count($vals) === 2) { $s = $vals[0]; $e = $vals[1]; $st = 1; }
             else { $s = $vals[0]; $e = $vals[1]; $st = $vals[2]; }
-            if ($st === 0) throw new PyHPValueError('range() step cannot be zero');
-            $out = [];
-            if ($st > 0) { for ($i = $s; $i < $e; $i += $st) $out[] = $i; }
-            else { for ($i = $s; $i > $e; $i += $st) $out[] = $i; }
-            return new PyList($out);
+            $stZero = $st instanceof PyBigInt ? $st->dec === '0' : $st === 0;
+            if ($stZero) throw new PyHPValueError('range() step cannot be zero');
+            return new PyHPView('range', [$s, $e, $st]);   // lazy — streams, supports big bounds
         }, 1, 3],
         'map' => [function (...$a) {
             pyhp_reg_errcheck($a, 'map', 2, null);
-            $f = $a[0]; $iters = array_slice($a, 1);
-            $cols = array_map(fn($it) => pyhp_iter_values($it), $iters);
-            $n = min(array_map(fn($c) => count($c), $cols));
-            $out = [];
-            for ($i = 0; $i < $n; $i++) {
-                $row = array_map(fn($c) => $c[$i], $cols);
-                $out[] = pyhp_callfunc($f, $row, 'map callback');
-            }
-            return new PyList($out);
+            if (!is_callable($a[0])) throw new PyHPTypeError("map(): 'callback' must be callable, got " . pyhp_type_name($a[0]));
+            return new PyHPView('map', $a);   // lazy view
         }, 2, null],
         'filter' => [function (...$a) {
             pyhp_reg_errcheck($a, 'filter', 2, 2);
-            $out = [];
-            foreach (pyhp_iter_values($a[1]) as $v) { if (pyhp_truthy(pyhp_callfunc($a[0], [$v], 'filter callback'))) $out[] = $v; }
-            return new PyList($out);
+            if (!is_callable($a[0])) throw new PyHPTypeError("filter(): 'callback' must be callable, got " . pyhp_type_name($a[0]));
+            return new PyHPView('filter', $a);   // lazy view
         }, 2, 2],
         'zip' => [function (...$a) {
             pyhp_reg_errcheck($a, 'zip', 1, null);
-            $cols = array_map(fn($it) => pyhp_iter_values($it), $a);
-            $n = min(array_map(fn($c) => count($c), $cols));
-            $out = [];
-            for ($i = 0; $i < $n; $i++) $out[] = new PyList(array_map(fn($c) => $c[$i], $cols));
-            return new PyList($out);
+            return new PyHPView('zip', $a);   // lazy view
         }, 1, null],
         'enumerate' => [function (...$a) {
             pyhp_reg_errcheck($a, 'enumerate', 1, 2);
-            $start = isset($a[1]) ? pyhp_range_int($a[1], 'enumerate') : 0;
-            $out = [];
-            foreach (pyhp_iter_values($a[0]) as $v) { $out[] = new PyList([$start++, $v]); }
-            return new PyList($out);
+            $start = isset($a[1]) ? pyhp_range_bound($a[1], 'enumerate') : 0;
+            return new PyHPView('enumerate', [$a[0], $start]);   // lazy view
         }, 1, 2],
         'sorted' => [function (...$a) {
             pyhp_reg_errcheck($a, 'sorted', 1, 1);
@@ -1136,14 +2108,30 @@ function pyhp_builtins(): array {
         }, 1, 1],
         'reversed' => [function (...$a) {
             pyhp_reg_errcheck($a, 'reversed', 1, 1);
-            return new PyList(array_reverse(pyhp_iter_values($a[0])));
+            $v = $a[0];
+            if ($v instanceof PyList || is_string($v)
+                || ($v instanceof PyHPView && $v->kind === 'range')) {
+                return new PyHPView('reversed', [$v]);   // lazy view over the sequence
+            }
+            throw new PyHPTypeError('reversed() requires a list, string or range, got ' . pyhp_type_name($v));
         }, 1, 1],
+        'next' => [function (...$a) {
+            pyhp_reg_errcheck($a, 'next', 1, 2);
+            $it = pyhp_iter($a[0]);
+            if (!$it->valid()) {
+                if (count($a) === 2) return $a[1];
+                throw new PyHPStopIteration();
+            }
+            $v = $it->current();
+            $it->next();
+            return $v;
+        }, 1, 2],
         'sum' => [function (...$a) {
             pyhp_reg_errcheck($a, 'sum', 1, 2);
             $acc = $a[1] ?? 0;
-            if (!pyhp_is_num($acc)) throw new PyHPTypeError('sum() start must be a number');
+            if (!pyhp_big_or_num($acc)) throw new PyHPTypeError('sum() start must be a number');
             foreach (pyhp_iter_values($a[0]) as $v) {
-                if (!pyhp_is_num($v)) throw new PyHPTypeError('sum() requires numbers, got ' . pyhp_type_name($v));
+                if (!pyhp_big_or_num($v)) throw new PyHPTypeError('sum() requires numbers, got ' . pyhp_type_name($v));
                 $acc = pyhp_add($acc, $v);
             }
             return $acc;
@@ -1187,8 +2175,12 @@ function pyhp_builtins(): array {
         /* math */
         'abs' => [function (...$a) {
             pyhp_reg_errcheck($a, 'abs', 1, 1);
-            if (!pyhp_is_num($a[0])) throw new PyHPTypeError('abs() requires a number');
-            return abs(pyhp_num($a[0]));
+            $v = $a[0];
+            if ($v instanceof PyBigInt) return new PyBigInt(ltrim($v->dec, '-'));
+            if (!pyhp_is_num($v)) throw new PyHPTypeError('abs() requires a number');
+            $n = pyhp_num($v);
+            if (is_int($n) && $n === PHP_INT_MIN) return new PyBigInt('9223372036854775808');
+            return abs($n);
         }, 1, 1],
         'min' => [function (...$a) {
             pyhp_reg_errcheck($a, 'min', 1, null);
@@ -1288,12 +2280,22 @@ function pyhp_builtins(): array {
         }, 1, 1],
         'hex' => [function (...$a) {
             pyhp_reg_errcheck($a, 'hex', 1, 1);
-            $n = pyhp_bitcheck($a[0], 'hex()');
+            $v = $a[0];
+            if ($v instanceof PyBigInt) {
+                $digits = pyhp_big_is_gmp() ? gmp_strval(pyhp_big_gmp($v), 16) : PyBigMath::toBase(ltrim($v->dec, '-'), 16);
+                return ($v->dec[0] === '-' ? '-0x' : '0x') . strtolower(ltrim($digits, '-'));
+            }
+            $n = pyhp_bitcheck($v, 'hex()');
             return ($n < 0 ? '-0x' : '0x') . strtolower(dechex(abs($n)));
         }, 1, 1],
         'bin' => [function (...$a) {
             pyhp_reg_errcheck($a, 'bin', 1, 1);
-            $n = pyhp_bitcheck($a[0], 'bin()');
+            $v = $a[0];
+            if ($v instanceof PyBigInt) {
+                $digits = pyhp_big_is_gmp() ? gmp_strval(pyhp_big_gmp($v), 2) : PyBigMath::toBase(ltrim($v->dec, '-'), 2);
+                return ($v->dec[0] === '-' ? '-0b' : '0b') . ltrim($digits, '-');
+            }
+            $n = pyhp_bitcheck($v, 'bin()');
             return ($n < 0 ? '-0b' : '0b') . decbin(abs($n));
         }, 1, 1],
 
@@ -1443,6 +2445,9 @@ function pyhp_val_to_json($v) {
         return $d;
     }
     if (is_object($v) || is_array($v)) {
+        if ($v instanceof PyBigInt) {
+            throw new PyHPValueError('json_string(): cannot serialize big-int (PHP JSON has no big number type) — convert with str() first');
+        }
         throw new PyHPValueError('json_string(): cannot serialize ' . pyhp_type_name($v));
     }
     return $v;
@@ -1595,6 +2600,21 @@ function pyhp_builtin_exists(string $name): bool {
 function pyhp_range_int($v, string $who): int {
     if (is_bool($v)) return (int)$v;
     if (is_int($v)) return $v;
+    if ($v instanceof PyBigInt) {
+        if (!pyhp_big_fits_int($v->dec)) {
+            throw new PyHPOverflowError("{$who}(): Python int too large to convert to C int");
+        }
+        return (int)$v->dec;
+    }
+    if (is_float($v) && floor($v) === $v) return (int)$v;
+    throw new PyHPTypeError("{$who}() expects an int, got " . pyhp_type_name($v));
+}
+
+/** range()/enumerate() bounds: like pyhp_range_int but big values stay big. */
+function pyhp_range_bound($v, string $who) {
+    if (is_bool($v)) return (int)$v;
+    if (is_int($v)) return $v;
+    if ($v instanceof PyBigInt) return $v;
     if (is_float($v) && floor($v) === $v) return (int)$v;
     throw new PyHPTypeError("{$who}() expects an int, got " . pyhp_type_name($v));
 }
@@ -1613,10 +2633,21 @@ function pyhp_pathstr($v, string $who): string {
 function pyhp_int_conv($v) {
     if (is_bool($v)) return $v ? 1 : 0;
     if (is_int($v)) return $v;
-    if (is_float($v)) return (int)$v;   // truncate toward zero, like Python int()
+    if ($v instanceof PyBigInt) return $v;   // int() on an int is exact, big included
+    if (is_float($v)) {
+        // truncate toward zero, like Python int(); out-of-range floats stay exact (big)
+        $t = $v > 0 ? floor($v) : ceil($v);
+        if ($t >= (float)PHP_INT_MAX || $t <= (float)PHP_INT_MIN) {
+            return new PyBigInt(sprintf('%.0f', $t));
+        }
+        return (int)$t;
+    }
     if (is_string($v)) {
         $t = trim($v);
-        if (preg_match('/^[+-]?\d+$/', $t)) return (int)$t;
+        if (preg_match('/^[+-]?\d+$/', $t)) {
+            if (pyhp_big_fits_int(pyhp_big_canon($t))) return (int)$t;
+            return new PyBigInt($t);   // exact, like Python int("999...9")
+        }
         throw new PyHPValueError("invalid literal for int(): '" . $v . "'");
     }
     throw new PyHPTypeError("int() expects a number or string, got " . pyhp_type_name($v));
@@ -1630,6 +2661,17 @@ function pyhp_isinstance($v, $name): bool {
         }
         return false;
     }
+    // builtin type names (int covers big-ints, like Python's isinstance(x, int))
+    $builtinType = match (true) {
+        $name === 'int'    => is_int($v) || $v instanceof PyBigInt || is_bool($v),
+        $name === 'float'  => is_float($v),
+        $name === 'string' => is_string($v),
+        $name === 'bool'   => is_bool($v),
+        $name === 'list'   => $v instanceof PyList,
+        $name === 'dict'   => $v instanceof PyDict,
+        default            => null,
+    };
+    if ($builtinType !== null) return $builtinType;
     if (!is_object($v)) return false;
     $map = pyhp_error_class_map();
     if (isset($map[$name]) && $v instanceof $map[$name]) return true;
@@ -1724,7 +2766,8 @@ function pyhp_cpp_type_kind(string $t): string {
     if (in_array($t, ['double', 'float', 'long double'], true)) return 'd';
     if (preg_match('/^(const\s+)?(char|unsigned char|uint8_t|int8_t)\s*\**$/', $t) && str_contains($t, '*')) return 's';
     if ($t === 'pyhp_list' || $t === 'pyhp list') return 'l';
-    throw new PyHPSyntaxError("pyhp-export: unsupported type '{$t}' (supported: int64_t, double, const char*, pyhp_list, void)");
+    if ($t === 'pyhp_dict' || $t === 'pyhp dict') return 'm';
+    throw new PyHPSyntaxError("pyhp-export: unsupported type '{$t}' (supported: int64_t, double, const char*, pyhp_list, pyhp_dict, void)");
 }
 
 class PyHPCppNative
@@ -1784,8 +2827,9 @@ class PyHPCppNative
             $cdef = self::$ffi;
             $sig = self::$exports[$name];
             $kinds = self::paramKinds($sig);
-            if (in_array('l', $kinds, true) || pyhp_cpp_type_kind($sig['ret']) === 'l') {
-                throw new PyHPError("{$name}: pyhp_list across the bridge needs the exec helper or the native backend — the FFI bridge cannot marshal structs");
+            if (in_array('l', $kinds, true) || in_array('m', $kinds, true)
+                || pyhp_cpp_type_kind($sig['ret']) === 'l' || pyhp_cpp_type_kind($sig['ret']) === 'm') {
+                throw new PyHPError("{$name}: pyhp_list/pyhp_dict across the bridge need the exec helper or the native backend — the FFI bridge cannot marshal structs");
             }
             self::$callables[$name] = function (...$args) use ($cdef, $name, $kinds) {
                 if (count($args) !== count($kinds)) {
@@ -1840,6 +2884,8 @@ class PyHPCppNative
                 throw new PyHPTypeError("{$fn}() expects a string (const char*) argument, got " . pyhp_type_name($v));
             case 'l':
                 throw new PyHPError("{$fn}(): pyhp_list arguments need the exec/native path — the FFI bridge cannot marshal structs");
+            case 'm':
+                throw new PyHPError("{$fn}(): pyhp_dict arguments need the exec/native path — the FFI bridge cannot marshal structs");
         }
         throw new PyHPTypeError("{$fn}(): unsupported bridge kind '{$kind}'");
     }
@@ -1871,7 +2917,11 @@ class PyHPCppNative
         $codes = [];
         foreach (self::$blocks as $list) { foreach ($list as $c) { $codes[] = $c; } }
         if (count($codes) === 0) throw new PyHPRuntimeError('no cpp blocks registered');
-        $hash = md5(implode("\n;;;\n", $codes) . '|' . PYHP_VERSION);
+        // the fingerprint covers user code, the engine version and the generated
+        // dispatcher, so protocol/runtime upgrades rebuild instead of reusing
+        // a stale helper binary
+        $dispatcher = self::genDispatcher(array_values(self::exportMap()));
+        $hash = md5(implode("\n;;;\n", $codes) . '|' . PYHP_VERSION . '|' . md5($dispatcher));
         if (self::$mode !== null && self::$builtHash === $hash) return;
         if (self::$mode !== null) { // code set changed: rebuild from scratch
             self::$mode = null;
@@ -1964,6 +3014,7 @@ class PyHPCppNative
 enum PyHpVKind : unsigned char { PYHP_VN = 0, PYHP_VI = 1, PYHP_VF = 2, PYHP_VS = 3 };
 struct pyhp_val { unsigned char kind; int64_t i; double f; const char* s; };
 struct pyhp_list { int64_t len; pyhp_val* items; };
+struct pyhp_dict { int64_t len; char** keys; pyhp_val* items; };
 ";
 
     /** Generated main() implementing the exec-mode line protocol. */
@@ -1983,6 +3034,7 @@ struct pyhp_list { int64_t len; pyhp_val* items; };
                     case 'd': $read[] = "        double {$vn} = pyhp_rt_read_d();"; break;
                     case 's': $read[] = "        std::string s{$i} = pyhp_rt_read_s();\n        const char* {$vn} = s{$i}.c_str();"; break;
                     case 'l': $read[] = "        pyhp_list a{$i} = pyhp_rt_read_list();"; break;
+                    case 'm': $read[] = "        pyhp_dict a{$i} = pyhp_rt_read_dict();"; break;
                 }
                 $call[] = $vn;
             }
@@ -1994,6 +3046,7 @@ struct pyhp_list { int64_t len; pyhp_val* items; };
                 case 'd': $body = "        std::printf(\"ok d:%s\\n\", pyhp_rt_fmt_d({$name}({$callStr})).c_str());"; break;
                 case 's': $body = "        pyhp_rt_write_s({$name}({$callStr}));"; break;
                 case 'l': $body = "        { pyhp_list r = {$name}({$callStr}); pyhp_rt_write_list(r); pyhp_list_free(&r); }"; break;
+                case 'm': $body = "        { pyhp_dict r = {$name}({$callStr}); pyhp_rt_write_dict(r); pyhp_dict_free(&r); }"; break;
                 default:  $body = "        std::printf(\"err unsupported return type\\n\");";
             }
             $branches .= "    if ({$guard}sym == \"{$name}\") {\n"
@@ -2012,6 +3065,7 @@ struct pyhp_list { int64_t len; pyhp_val* items; };
 enum PyHpVKind : unsigned char { PYHP_VN = 0, PYHP_VI = 1, PYHP_VF = 2, PYHP_VS = 3 };
 struct pyhp_val { unsigned char kind; int64_t i; double f; const char* s; };
 struct pyhp_list { int64_t len; pyhp_val* items; };
+struct pyhp_dict { int64_t len; char** keys; pyhp_val* items; };
 
 {$protos}
 
@@ -2050,6 +3104,38 @@ static pyhp_list pyhp_rt_read_list() {
     return L;
 }
 
+static pyhp_dict pyhp_rt_read_dict() {
+    long count = 0;
+    if (std::scanf(" d%ld:", &count) != 1) { std::printf("err bad dict arg\\n"); std::exit(3); }
+    pyhp_dict D;
+    D.len = (int64_t)count;
+    D.keys = (char**)std::malloc(sizeof(char*) * (size_t)(count > 0 ? count : 1));
+    D.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (size_t)(count > 0 ? count : 1));
+    for (long i = 0; i < count; i++) {
+        long klen = 0;
+        if (std::scanf(" k:%ld:", &klen) != 1) { std::printf("err bad dict key\\n"); std::exit(3); }
+        std::string key((size_t)(klen > 0 ? klen : 0), '\\0');
+        if (klen > 0 && std::fread(&key[0], 1, (size_t)klen, stdin) != (size_t)klen) { std::printf("err truncated dict key\\n"); std::exit(3); }
+        std::getchar(); // newline after the key bytes
+        char tag = 0;
+        if (std::scanf(" %c", &tag) != 1) { std::printf("err bad dict element\\n"); std::exit(3); }
+        pyhp_val pv; pv.kind = PYHP_VN; pv.i = 0; pv.f = 0.0; pv.s = nullptr;
+        if (tag == 'i') { long long v = 0; std::scanf(":%lld", &v); pv.kind = PYHP_VI; pv.i = (int64_t)v; }
+        else if (tag == 'd') { char buf[64]; std::scanf(":%63s", buf); pv.kind = PYHP_VF; pv.f = std::strtod(buf, nullptr); }
+        else if (tag == 's') {
+            long len = 0;
+            std::scanf(":%ld:", &len);
+            std::string t((size_t)(len > 0 ? len : 0), '\\0');
+            if (len > 0 && std::fread(&t[0], 1, (size_t)len, stdin) != (size_t)len) { std::printf("err truncated string arg\\n"); std::exit(3); }
+            pv.kind = PYHP_VS; pv.s = strdup(t.c_str());
+            std::getchar();
+        } else if (tag == 'n') { std::getchar(); }
+        else { std::printf("err bad dict element tag\\n"); std::exit(3); }
+        D.keys[i] = strdup(key.c_str());
+        D.items[i] = pv;
+    }
+    return D;
+}
 static int64_t pyhp_rt_read_i() {
     long long v = 0;
     if (std::scanf("%lld", &v) != 1) { std::printf("err bad int arg\\n"); std::exit(3); }
@@ -2094,8 +3180,37 @@ static void pyhp_rt_write_list(const pyhp_list& L) {
         } else std::printf("n\\n");
     }
 }
+static void pyhp_rt_write_dict(const pyhp_dict& D) {
+    std::printf("ok d:%lld:", (long long)D.len);
+    for (int64_t i = 0; i < D.len; i++) {
+        const char* k = D.keys[i] ? D.keys[i] : "";
+        unsigned long kl = std::strlen(k);
+        std::printf("k:%lu:", kl);
+        if (kl > 0) std::fwrite(k, 1, kl, stdout);
+        std::printf("\\n");
+        const pyhp_val& p = D.items[i];
+        if (p.kind == PYHP_VI) std::printf("i:%lld\\n", (long long)p.i);
+        else if (p.kind == PYHP_VF) std::printf("d:%s\\n", pyhp_rt_fmt_d(p.f).c_str());
+        else if (p.kind == PYHP_VS) {
+            unsigned long sl = p.s ? std::strlen(p.s) : 0;
+            std::printf("s:%lu:", sl);
+            if (sl > 0) std::fwrite(p.s, 1, sl, stdout);
+            std::printf("\\n");
+        } else std::printf("n\\n");
+    }
+}
 
-
+static void pyhp_dict_free(pyhp_dict* D) {
+    if (!D->items) return;
+    for (int64_t i = 0; i < D->len; i++) {
+        if (D->keys[i]) std::free((void*)D->keys[i]);
+        if (D->items[i].kind == PYHP_VS && D->items[i].s != nullptr) std::free((void*)D->items[i].s);
+    }
+    std::free(D->keys);
+    std::free(D->items);
+    D->keys = nullptr;
+    D->items = nullptr;
+}
 int main(int argc, char** argv) {
     if (argc < 2) { std::printf("err missing symbol\\n"); return 2; }
     std::string sym = argv[1];
@@ -2155,6 +3270,73 @@ CPP;
         return new PyList($items);
     }
 
+    /** Encode a PyDict argument in the exec-mode element protocol:
+     *  "d<count>\n" then per entry a key line (k:len:bytes\n) and a value
+     *  line (i:..\n d:..\n s:len:bytes\n n\n). */
+    private static function encodeDictArg($v, string $fn): string {
+        if (!($v instanceof PyDict)) {
+            throw new PyHPTypeError("{$fn}() expects a dict (pyhp_dict) argument, got " . pyhp_type_name($v));
+        }
+        $req = 'd' . count($v->d) . "\n";
+        foreach ($v->d as $k => $el) {
+            $ks = (string)$k;   // int keys ride as decimal strings across the bridge
+            $req .= 'k:' . strlen($ks) . ':' . $ks . "\n";
+            if ($el === null) { $req .= "n\n"; }
+            elseif (is_int($el)) { $req .= "i:{$el}\n"; }
+            elseif (is_float($el)) { $req .= 'd:' . json_encode($el) . "\n"; }
+            elseif (is_string($el)) { $req .= 's:' . strlen($el) . ':' . $el . "\n"; }
+            else {
+                throw new PyHPTypeError("{$fn}(): pyhp_dict values must be int/float/string/null, got " . pyhp_type_name($el));
+            }
+        }
+        return $req;
+    }
+
+    /** Bridge dict keys that look like non-negative integers become int keys
+     *  on the PyHP side (same round-trip rule as json_parse). */
+    private static function bridgeKey(string $k) {
+        if (preg_match('/^[0-9]+$/', $k) === 1) {
+            return pyhp_int_conv($k);
+        }
+        return $k;
+    }
+
+    /** Parse "ok d:<count>:" + key/value line pairs out of the response stream. */
+    private static function parseDictPayload(string $out, int $p, int $count, string $name) {
+        $d = [];
+        for ($k = 0; $k < $count; $k++) {
+            if ($p >= strlen($out) || $out[$p] !== 'k') {
+                throw new PyHPRuntimeError("native call '{$name}': truncated dict response");
+            }
+            $colon = strpos($out, ':', $p + 2);
+            $len = (int)substr($out, $p + 2, $colon - $p - 2);
+            $start = $colon + 1;
+            $key = substr($out, $start, $len);
+            $p = $start + $len + 1;   // past the trailing \n
+            if ($p >= strlen($out)) throw new PyHPRuntimeError("native call '{$name}': truncated dict response");
+            $tag = $out[$p];
+            if ($tag === 'n') { $d[self::bridgeKey($key)] = null; $p += 2; continue; }
+            if ($tag === 'i' || $tag === 'd') {
+                $nl = strpos($out, "\n", $p);
+                if ($nl === false) throw new PyHPRuntimeError("native call '{$name}': truncated dict response");
+                $raw = substr($out, $p + 2, $nl - $p - 2);
+                $d[self::bridgeKey($key)] = $tag === 'i' ? (int)$raw : (float)$raw;
+                $p = $nl + 1;
+                continue;
+            }
+            if ($tag === 's') {
+                $colon2 = strpos($out, ':', $p + 2);
+                $vlen = (int)substr($out, $p + 2, $colon2 - $p - 2);
+                $vstart = $colon2 + 1;
+                $d[self::bridgeKey($key)] = substr($out, $vstart, $vlen);
+                $p = $vstart + $vlen + 1;
+                continue;
+            }
+            throw new PyHPRuntimeError("native call '{$name}': malformed dict response");
+        }
+        return new PyDict($d);
+    }
+
     private static function execCall(string $bin, string $name, array $args, array $kinds) {
         if (!is_file($bin)) throw new PyHPRuntimeError('native helper binary is missing: ' . $bin);
         $req = count($kinds) . "\n";
@@ -2164,6 +3346,7 @@ CPP;
                 case 'd': $req .= json_encode((float)self::toC($v, 'd', $name)) . "\n"; break;
                 case 's': $s = (string)self::toC($v, 's', $name); $req .= 's:' . strlen($s) . ':' . $s; break;
                 case 'l': $req .= self::encodeListArg($v, $name); break;
+                case 'm': $req .= self::encodeDictArg($v, $name); break;
             }
         }
         $desc = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
@@ -2183,7 +3366,6 @@ CPP;
         $payload = substr($line, 3); // after "ok " — e.g. "i:42", "s:12:PyHP native!"
         if ($payload === 'v:') return null;
         if (str_starts_with($payload, 'i:')) return (int)substr($payload, 2);
-        if (str_starts_with($payload, 'd:')) return (float)substr($payload, 2);
         if (str_starts_with($payload, 's:')) {
             $colon = strpos($payload, ':', 2);
             $len = (int)substr($payload, 2, $colon - 2);
@@ -2194,6 +3376,15 @@ CPP;
             $colon = strpos($out, ':', 5);
             $count = (int)substr($out, 5, $colon - 5);
             return self::parseListPayload($out, $colon + 1, $count, $name);
+        }
+        // "d:<count>:" is a dict response; "d:<double>" (no second colon) is a double
+        if (str_starts_with($payload, 'd:') && preg_match('/^d:\d+:/', $payload) === 1) {
+            $colon = strpos($out, ':', 5);
+            $count = (int)substr($out, 5, $colon - 5);
+            return self::parseDictPayload($out, $colon + 1, $count, $name);
+        }
+        if (str_starts_with($payload, 'd:')) {
+            return (float)substr($payload, 2);
         }
         throw new PyHPRuntimeError("native call '{$name}': malformed response");
     }

@@ -32,6 +32,30 @@ print(2 + "x");
 CODE
 , "14\n20\n512\n-4\n1\n2\n-2\n3.5\n3.5\n2x\n"];
 
+$T[] = ['big-int arithmetic', <<<'CODE'
+print(9223372036854775807 + 1);
+print(2 ** 100);
+print(2 ** 100 % 97);
+print(2 ** 100 * 3);
+big = int("99999999999999999999");
+print(big + 1, big - 1);
+print(hex(2 ** 80), bin(2 ** 10));
+print(0xFFFFFFFFFFFFFFFFFF);
+print(-(2 ** 64) % 100);
+print(2 ** 100 > 10 ** 30, 2 ** 100 == 2 ** 100, 2 ** 99 < 2 ** 100);
+print(2 ** 100 + 0.5);
+d = {2 ** 70: "big"};
+print(d[2 ** 70]);
+print(f"{2 ** 80:,}");
+print(f"{2 ** 80:x}");
+xs = [2 ** 64, 3, 2 ** 64];
+print(sum(xs), sorted(xs));
+print(type(2 ** 100), isinstance(2 ** 100, "int"));
+try { print(10 ** 400 / 3); } catch (OverflowError e) { print("caught:", e.message); }
+try { int("12x"); } catch (ValueError e) { print("caught:", e.message); }
+CODE
+, "9223372036854775808\n1267650600228229401496703205376\n16\n3802951800684688204490109616128\n100000000000000000000 99999999999999999998\n0x100000000000000000000 0b10000000000\n4722366482869645213695\n84\ntrue true true\n1.2676506002282E+30\nbig\n1,208,925,819,614,629,174,706,176\n100000000000000000000\n36893488147419103235 [3, 18446744073709551616, 18446744073709551616]\nint true\ncaught: int too large to convert to float\ncaught: invalid literal for int(): '12x'\n"];
+
 $T[] = ['strings & f-strings', <<<'CODE'
 s = "hello";
 print(s.upper(), s[0], s[-1], len(s));
@@ -133,7 +157,7 @@ print(sum_all(1, 2, 3, 4));
 function fib(int n) -> int { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
 print(fib(12));
 sq = lambda x: x * x;
-print(map(sq, [1, 2, 3]));
+print(list(map(sq, [1, 2, 3])));
 function make_counter() {
     n = 0;
     return function() { n += 1; return n; };
@@ -179,6 +203,61 @@ d = Dog();
 print(d.speak(times = 2));
 CODE
 , "Hello, World!\nHi, World!\nHello, World?\nYo, Ada!\nYo, Bob!\n['fig', 'pear', 'banana']\n['pear', 'fig', 'banana']\n[-1, 2, 3]\nWoofWoof\n"];
+
+$T[] = ['generators & lazy views', <<<'CODE'
+function gen(n) {
+    print("start");
+    for (int i = 0; i < n; i++) { yield i * i; }
+    print("end");
+    return 99;
+}
+g = gen(4);
+print(type(g), next(g), next(g));
+foreach x in g { print("got", x); }
+try { next(g); } catch (StopIteration e) { print("stopped"); }
+print(list(gen(3)), sum(gen(4)));
+function fib() {
+    int a = 0; int b = 1;
+    while true { yield a; int t = a + b; a = b; b = t; }
+}
+first = [];
+foreach x in fib() { first.append(x); if len(first) == 10 { break; } }
+print(first);
+lam = lambda x: (yield x + 1);
+print(next(lam(41)));
+function naturals(int from) { int k = from; while true { yield k; k += 1; } }
+m = map(lambda v: v * v, naturals(0));
+taken = [];
+foreach v in m { taken.append(v); if len(taken) == 5 { break; } }
+print(taken);
+print(range(2 ** 70, 2 ** 70 + 2));
+foreach b in range(2 ** 70, 2 ** 70 + 2) { print("big", b); }
+r = range(10, 0, -2);
+print(r, len(r), r[2], 4 in r, 5 in r);
+print(range(0, 10)[2:8:2]);
+print(list(filter(lambda x: x % 2 == 0, range(8))));
+print(list(zip(range(3), "abc")), list(enumerate("hi", 10)));
+print(str(range(5)), str(map(lambda v: v, [1])), str(naturals(1)));
+class Box {
+    string tag = "b";
+    function items(int count) {
+        for (int i = 0; i < count; i++) { yield this.tag + str(i); }
+    }
+}
+print(list(Box().items(3)));
+counter = 10;
+function withState() { yield counter; counter += 5; yield counter; }
+ws = withState();
+print(next(ws), next(ws), counter);
+function g3() { yield 1; yield 2; yield 3; }
+print([x * 10 for x in g3()], sorted(g3(), reverse = true), sorted(g3(), key = lambda v: -v));
+print(next(g3(), "dflt"));
+function inner2(n) { yield n * 2; }
+function outer2() { yield inner2(21); }   // calling a generator fn yields a generator
+print(list(outer2()), next(list(outer2())[0]));
+try { gen(1, 2); } catch (TypeError e) { print("arity:", e.message); }
+CODE
+, "start\ngenerator 0 1\ngot 4\ngot 9\nend\nstopped\nstart\nend\nstart\nend\n[0, 1, 4] 14\n[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]\n42\n[0, 1, 4, 9, 16]\nrange(1180591620717411303424, 1180591620717411303426)\nbig 1180591620717411303424\nbig 1180591620717411303425\nrange(10, 0, -2) 5 6 true false\nrange(2, 8, 2)\n[0, 2, 4, 6]\n[[0, 'a'], [1, 'b'], [2, 'c']] [[10, 'h'], [11, 'i']]\nrange(0, 5) <map object> <generator object naturals>\n['b0', 'b1', 'b2']\n10 15 15\n[10, 20, 30] [3, 2, 1] [3, 2, 1]\n1\n[<generator object inner2>] 42\narity: gen() takes 1 argument(s), 2 given\n"];
 
 $T[] = ['keyword argument errors', <<<'CODE'
 function f(a, b = 2) { return a + b; }
@@ -289,11 +368,11 @@ print(time() >= t1);
 CODE), "one\ntwo\n['one', 'two', 'three'] 3\ntrue\nfalse\npyhp-shell-ok true\ntrue\ntrue\n"];
 
 $T[] = ['builtin functions', <<<'CODE'
-print(range(4), range(2, 5), range(10, 0, -3));
+print(range(4), range(2, 5), range(10, 0, -3));   // lazy views, Python-style repr
 print(len(range(3)), sum([1, 2, 3]), sum([1, 2], 10));
 print(min([3, 1, 2]), max(3, 1, 2), abs(-4), floor(2.7), ceil(2.1), round(2.567, 2), sqrt(16));
-print(sorted([3, 1, 2]), reversed([1, 2, 3]), enumerate(["a", "b"]));
-print(zip([1, 2], ["x", "y"]));
+print(sorted([3, 1, 2]), list(reversed([1, 2, 3])), list(enumerate(["a", "b"])));
+print(list(zip([1, 2], ["x", "y"])));
 print(any([0, null, false]), all([1, "x", true]));
 print(int("42"), int(3.99), float("2.5"), str(12), bool(0), bool("x"));
 print(list("abc"), list({"a": 1}), dict([[1, "a"]]));
@@ -302,7 +381,7 @@ print(repr("hi"), repr([1, "a"]));
 print(rand(1), rand(5, 5));
 try { int("3.9"); } catch (ValueError e) { print("strict int"); }
 CODE
-, "[0, 1, 2, 3] [2, 3, 4] [10, 7, 4, 1]\n3 6 13\n1 3 4 2 3 2.57 4.0\n[1, 2, 3] [3, 2, 1] [[0, 'a'], [1, 'b']]\n[[1, 'x'], [2, 'y']]\nfalse true\n42 3 2.5 12 false true\n['a', 'b', 'c'] ['a'] {1: 'a'}\nint float string bool null list dict function\n'hi' [1, 'a']\n0 5\nstrict int\n"];
+, "range(0, 4) range(2, 5) range(10, 0, -3)\n3 6 13\n1 3 4 2 3 2.57 4.0\n[1, 2, 3] [3, 2, 1] [[0, 'a'], [1, 'b']]\n[[1, 'x'], [2, 'y']]\nfalse true\n42 3 2.5 12 false true\n['a', 'b', 'c'] ['a'] {1: 'a'}\nint float string bool null list dict function\n'hi' [1, 'a']\n0 5\nstrict int\n"];
 
 $T[] = ['argv', <<<'CODE'
 a = argv();
@@ -391,11 +470,11 @@ CODE
 
 $T[] = ['functions as values', <<<'CODE'
 function double(x) { return x * 2; }
-print(map(double, [1, 2, 3]));
+print(list(map(double, [1, 2, 3])));
 print(sorted(["b", "a", "c"]));
 g = double;
 print(g(21));
-print(["apply:", map(lambda v: v + 1, [9, 19])]);
+print(["apply:", list(map(lambda v: v + 1, [9, 19]))]);
 CODE
 , "[2, 4, 6]\n['a', 'b', 'c']\n42\n['apply:', [10, 20]]\n"];
 
@@ -766,7 +845,7 @@ CODE
 /* runners                                                          */
 /* ================================================================ */
 
-function run_interpreter(string $code, array $args, array $files = []): string {
+function run_interpreter(string $code, array $args, array $files = [], string $engine = 'tree'): string {
     $oldCwd = getcwd();
     $dir = null;
     if (count($files) > 0) {
@@ -779,7 +858,7 @@ function run_interpreter(string $code, array $args, array $files = []): string {
         $stmts = PyHPParser::parseSource($code);
         $interp = new PyHPInterpreter();
         if ($dir !== null) { $interp->setMainFile($dir . '/main.pyh'); }
-        $interp->runProgram($stmts);
+        $interp->runProgram($stmts, $engine);
     } catch (PyHPExit $e) {
         // exit(code) — output already flushed
     } catch (Throwable $e) {
@@ -868,18 +947,24 @@ foreach ($T as $case) {
     $norm = function (string $s): string { return str_replace("\r\n", "\n", $s); };
     $expected = $norm($expected);
     $gotI = $norm(run_interpreter($code, $args, $files));
+    $gotV = $norm(run_interpreter($code, $args, $files, 'vm'));
     $gotC = $norm(run_compiled($code, $args, $phpBin, $files));
     $okI = ($gotI === $expected);
+    $okV = ($gotV === $expected);
     $okC = ($gotC === $expected);
-    if ($okI && $okC) {
+    if ($okI && $okV && $okC) {
         $passed++;
-        $results[] = sprintf("  %-46s %s", $name, "PASS (interp + compiled)");
+        $results[] = sprintf("  %-46s %s", $name, "PASS (tree + vm + compiled)");
     } else {
         $failed++;
         $results[] = sprintf("  %-46s FAIL", $name);
         if (!$okI) {
             $results[] = "    interpreter expected: " . json_encode($expected);
             $results[] = "    interpreter got:      " . json_encode($gotI);
+        }
+        if (!$okV) {
+            $results[] = "    vm expected:          " . json_encode($expected);
+            $results[] = "    vm got:               " . json_encode($gotV);
         }
         if (!$okC) {
             $results[] = "    compiled expected:    " . json_encode($expected);
@@ -968,6 +1053,60 @@ print("empty:", pyh_mean([]));
 print("floats:", pyh_mean([1.5, 2.5]));
 CODE
 , "mean: 2.5\nsquares: [1, 4, 9, 16]\nstrings: 3\nempty: 0.0\nfloats: 2.0\n"],
+        ['native backend: classes', <<<'CODE'
+class Animal {
+    string name;
+    string sound = "...";
+    function __construct(string name, sound = "...") {
+        this.name = name;
+        this.sound = sound;
+    }
+    function speak(times = 1) {
+        string out = "";
+        for (int i = 0; i < times; i++) { out += this.name + " says " + this.sound; }
+        return out;
+    }
+    function __str__() { return "<" + this.name + ">"; }
+}
+class Dog extends Animal {
+    function __construct(string name) {
+        super(name, sound = "Woof");
+    }
+    function fetch(item) { return this.name + " fetches " + item; }
+}
+a = Animal("Generic");
+d = Dog("Rex");
+print(a.speak());
+print(d.speak(2));
+print(d.fetch("ball"));
+print(str(d), a.sound, d.sound);
+print(isinstance(d, "Dog"), isinstance(d, "Animal"), isinstance(a, "Dog"));
+d.sound = "Bark";
+print(d.speak());
+try { d.sound = 5; } catch (TypeError e) { print("typecheck:", e.message); }
+class Counter {
+    int count = 0;
+    function bump(by = 1) { this.count += by; return this.count; }
+}
+c = Counter();
+c.bump(); c.bump(5);
+print(c.count, c.bump());
+class Range2 {
+    int n = 0;
+    int i = 0;
+    function __construct(int n) { this.n = n; }
+    function __iter__() { return this; }
+    function __next__() {
+        if this.i >= this.n { throw StopIteration(); }
+        this.i += 1;
+        return this.i * this.i;
+    }
+}
+print(list(Range2(4)), list(Range2(4)));
+foreach item in [d, a] { print("in loop:", item.name); }
+print(sorted([Counter(), Counter()], key = lambda x: x.count)[0].count);
+CODE
+, "Generic says ...\nRex says WoofRex says Woof\nRex fetches ball\n<Rex> ... Woof\ntrue true false\nRex says Bark\ntypecheck: type mismatch: cannot assign int to string variable 'sound'\n6 7\n[1, 4, 9, 16] [1, 4, 9, 16]\nin loop: Rex\nin loop: Generic\n0\n"],
         ['native backend: cpp blocks', <<<'CODE'
 cpp {
     // pyhp-export: int64_t pyh_add3(int64_t a, int64_t b, int64_t c);
@@ -978,6 +1117,49 @@ cpp {
 print("sum=", pyh_add3(2, 3, 4));
 CODE
 , "sum= 14\n"],
+        ['native backend: dict bridge', <<<'CODE'
+cpp {
+    // pyhp-export: double pyh_dict_sum(pyhp_dict d);
+    // pyhp-export: pyhp_dict pyh_dict_scale(pyhp_dict d, int64_t factor);
+    // pyhp-export: int64_t pyh_dict_count_str(pyhp_dict d);
+
+    double pyh_dict_sum(pyhp_dict d) {
+        double s = 0.0;
+        for (int64_t i = 0; i < d.len; i++) {
+            if (d.items[i].kind == 1) s += (double)d.items[i].i;
+            if (d.items[i].kind == 2) s += d.items[i].f;
+        }
+        return s;
+    }
+    pyhp_dict pyh_dict_scale(pyhp_dict d, int64_t factor) {
+        pyhp_dict out;
+        out.len = d.len;
+        out.keys = (char**)std::malloc(sizeof(char*) * (d.len > 0 ? (size_t)d.len : 1));
+        out.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (d.len > 0 ? (size_t)d.len : 1));
+        for (int64_t i = 0; i < d.len; i++) {
+            out.keys[i] = strdup(d.keys[i] ? d.keys[i] : "");
+            pyhp_val pv; pv.kind = 0; pv.i = 0; pv.f = 0; pv.s = nullptr;
+            if (d.items[i].kind == 1) { pv.kind = 1; pv.i = d.items[i].i * factor; }
+            if (d.items[i].kind == 2) { pv.kind = 2; pv.f = d.items[i].f * factor; }
+            if (d.items[i].kind == 3) { pv.kind = 3; pv.s = strdup(d.items[i].s); }
+            out.items[i] = pv;
+        }
+        return out;   // ownership moves to PyHP (copied, then freed)
+    }
+    int64_t pyh_dict_count_str(pyhp_dict d) {
+        int64_t c = 0;
+        for (int64_t i = 0; i < d.len; i++) { if (d.items[i].kind == 3) c++; }
+        return c;
+    }
+}
+scores = {"alice": 10, "bob": 20, 5: 2.5};
+print("sum:", pyh_dict_sum(scores));
+print("scaled:", pyh_dict_scale(scores, 3));
+print("labels:", pyh_dict_scale({"name": "pyhp", "os": "any"}, 1));
+print("strings:", pyh_dict_count_str({"a": "x", "b": 1, "c": null}));
+print("empty:", pyh_dict_sum({}));
+CODE
+, "sum: 32.5\nscaled: {'alice': 30, 'bob': 60, 5: 7.5}\nlabels: {'name': 'pyhp', 'os': 'any'}\nstrings: 1\nempty: 0.0\n"],
     ];
     foreach ($nativeCases as [$name, $code, $expected]) {
         $dir = pyhp_test_fixture_dir(['main.pyh' => $code]);
@@ -998,6 +1180,78 @@ CODE
             $results[] = sprintf("  %-46s FAIL (native)", $name);
             $results[] = "    native expected: " . json_encode($expected);
             $results[] = "    native got:      " . json_encode($gotN);
+        }
+    }
+
+    /* exec-helper bridge tests: the same cpp blocks through the interpreter
+     * (PyHPCppNative exec mode — g++ compiles the generated dispatcher). */
+    $execCases = [
+        ['exec helper: list bridge', <<<'CODE'
+cpp {
+    // pyhp-export: pyhp_list pyh_rev(pyhp_list xs);
+    pyhp_list pyh_rev(pyhp_list xs) {
+        pyhp_list out;
+        out.len = xs.len;
+        out.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (xs.len > 0 ? xs.len : 1));
+        for (int64_t i = 0; i < xs.len; i++) {
+            pyhp_val pv; pv.kind = 0; pv.i = 0; pv.f = 0; pv.s = nullptr;
+            if (xs.items[i].kind == 1) { pv.kind = 1; pv.i = xs.items[i].i; }
+            if (xs.items[i].kind == 3) { pv.kind = 3; pv.s = strdup(xs.items[i].s); }
+            out.items[xs.len - 1 - i] = pv;
+        }
+        return out;
+    }
+}
+print(pyh_rev([1, "two", 3, null]));
+CODE
+, "[null, 3, 'two', 1]\n"],
+        ['exec helper: dict bridge', <<<'CODE'
+cpp {
+    // pyhp-export: pyhp_dict pyh_flip(pyhp_dict d);
+    // pyhp-export: double pyh_dict_sum(pyhp_dict d);
+    pyhp_dict pyh_flip(pyhp_dict d) {
+        pyhp_dict out;
+        out.len = d.len;
+        out.keys = (char**)std::malloc(sizeof(char*) * (d.len > 0 ? (size_t)d.len : 1));
+        out.items = (pyhp_val*)std::malloc(sizeof(pyhp_val) * (d.len > 0 ? (size_t)d.len : 1));
+        for (int64_t i = 0; i < d.len; i++) {
+            out.keys[i] = strdup(d.keys[i] ? d.keys[i] : "");
+            out.items[i] = d.items[d.len - 1 - i];
+        }
+        return out;   // ownership moves to PyHP (values copied per key)
+    }
+    double pyh_dict_sum(pyhp_dict d) {
+        double s = 0.0;
+        for (int64_t i = 0; i < d.len; i++) {
+            if (d.items[i].kind == 1) s += (double)d.items[i].i;
+            if (d.items[i].kind == 2) s += d.items[i].f;
+        }
+        return s;
+    }
+}
+d = {"a": 1, "b": "two", 7: 2.5};
+print(pyh_flip(d));    // keys stay in order, values are reversed by the C code
+print("sum:", pyh_dict_sum(d));
+CODE
+, "{'a': 2.5, 'b': 'two', 7: 1}\nsum: 3.5\n"],
+    ];
+    foreach ($execCases as [$name, $code, $expected]) {
+        $dir = pyhp_test_fixture_dir(['main.pyh' => $code]);
+        $oldCwd = getcwd();
+        chdir($dir);
+        $gotE = (string)shell_exec(escapeshellarg($phpBin) . ' ' . escapeshellarg(__DIR__ . '/../bin/pyhp')
+            . ' run main.pyh 2>&1');
+        chdir($oldCwd);
+        pyhp_test_cleanup($dir);
+        $okE = (str_replace("\r\n", "\n", $gotE) === str_replace("\r\n", "\n", $expected));
+        if ($okE) {
+            $passed++;
+            $results[] = sprintf("  %-46s %s", $name, "PASS (exec)");
+        } else {
+            $failed++;
+            $results[] = sprintf("  %-46s FAIL (exec)", $name);
+            $results[] = "    exec expected: " . json_encode($expected);
+            $results[] = "    exec got:      " . json_encode($gotE);
         }
     }
 } else {

@@ -1,4 +1,4 @@
-# PyHP 0.6.0
+# PyHP 0.7.0
 
 [![CI](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml/badge.svg)](https://github.com/Stevem100/pyhp/actions/workflows/ci.yml)
 
@@ -15,13 +15,25 @@ PyHP is a small dynamically-typed scripting language that fuses three bloodlines
 
 PyHP ships with **three execution paths** built from the same front-end:
 
-1. **Our own interpreter** — a hand-written lexer → recursive-descent parser → AST → tree-walking evaluator (`pyhp run`, `pyhp repl`).
+1. **Our own bytecode VM** — hand-written lexer → recursive-descent parser → bytecode → stack-machine dispatch loop (`pyhp run`; `--tree` keeps the classic tree-walking evaluator, and `pyhp repl` uses it too).
 2. **A transpiler** — PyHP → clean, standalone PHP 8 source (`pyhp build` / `pyhp compile`) that runs natively and requires only `src/runtime.php`.
 3. **A native C++ backend** — PyHP → single-file C++17 → machine code (`pyhp build --target cpp|native`). Your embedded `cpp { ... }` blocks go straight into the binary: no PHP, no interpreter, no FFI.
 
-All paths share the exact same data model, so the 43-case test suite passes every program through the engines and asserts byte-identical output.
+All paths share the exact same data model, so the 46-case test suite passes every program through the engines (tree, VM, transpiler — plus native where g++ exists) and asserts byte-identical output.
 
-New in 0.6.0: **f-string format specs** — `f"pi={x:.2f}"`, `f"[{n:>10}]"`,
+New in 0.7.0: **generators** (`yield` — lazy sequences you can `break` out of,
+with a new `next(it, default)`), **lazy views** (`range`/`map`/`filter`/`zip`/
+`enumerate`/`reversed` stream like Python; `range(2 ** 70)` costs nothing),
+**big integers** (Python-style promotion: `9223372036854775807 + 1` and
+`2 ** 100` are exact, huge literals parse exactly), a **bytecode VM** for the
+interpreter path, **native classes** (full OOP in the C++ backend: ctor kwargs,
+`super`, `__str__`, `isinstance`, the iterator protocol), **dicts across the
+cpp bridge** (`pyhp_dict` joins `pyhp_list`), and **`pyhp langs`** — an
+offline one-command bridge to PHP/Python/C++/JavaScript syntax and functions,
+so you never need those runtimes installed just to look something up (same
+tables as [docs/BRIDGE.md](docs/BRIDGE.md)).
+
+Also in 0.6.0: **f-string format specs** — `f"pi={x:.2f}"`, `f"[{n:>10}]"`,
 `f"{n:,}"`, `f"{p:.1%}"` and the full Python mini-language, byte-identical on
 all three engines. **Modules now carry state and classes across files**:
 module-level vars work in compiled mode, `class X extends S` where
@@ -355,15 +367,16 @@ primary     = INT | FLOAT | STRING | FSTRING | "true" | "false" | "null" | ident
 
 ## Roadmap
 
-0.6.0 cleared six of the seven open items (format specs, module state in
-compiled mode, cross-module class exports, the remote registry + lockfile,
-lists across the C++ bridge, native lambdas, the iterator protocol). What
-remains:
+The open backlog is now **empty** — 0.7.0 cleared everything that was left
+after 0.6.0's sprint (native classes with a heap-scoped model, lazy
+generators + lazy `range`/`map` views, dicts across the C++ bridge, the
+bytecode VM, big-int arithmetic) and added `pyhp langs`, the offline
+cross-language bridge.
 
-* classes in the native C++ backend (needs a heap-scoped class model; lambdas landed in 0.6.0)
-* lazy generators (`yield`) and lazy `range`/`map` views — the iterator protocol (`__iter__`/`__next__`) landed in 0.6.0, but sequences stay eager
-* dicts across the C++ bridge (lists landed in 0.6.0)
-* bytecode VM for the interpreter path, big-int arithmetic (gmp is available in the bundled PHP build when we pick this up)
+Ideas for future sprints (not started): generator `send()`/`close()`, `yield
+from`, async I/O, a `pip`-style registry UI for `pyhp pkg`, and cross-engine
+big-int support in the native backend (currently int64 only with clear
+errors).
 
 ## License
 

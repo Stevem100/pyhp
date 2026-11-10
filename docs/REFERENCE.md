@@ -1,16 +1,18 @@
-# PyHP 0.6.0 — Complete Reference
+# PyHP 0.7.0 — Complete Reference
 
 **PHP syntax. Python brains. C muscles.**
 
 Every command, statement, operator, builtin and method in the language —
-verified against the implementation by the 37-case test suite, which runs every
-program through the execution engines (interpreter, PHP transpiler and, where a
-C++ compiler is present, the native C++ backend) and requires byte-identical
-output.
+verified against the implementation by the 46-case test suite, which runs every
+program through all three engines (tree-walking interpreter, bytecode VM and
+PHP transpiler — and, where a C++ compiler is present, the native C++ backend)
+and requires byte-identical output.
 
 - File extension: `.pyh`
-- Runs on: PHP 8.0+ CLI (no extensions required); native backend needs g++/clang++
-- Engines: `pyhp run` / `pyhp repl` (tree-walking interpreter) ·
+- Runs on: PHP 8.0+ CLI (no extensions required; gmp optional for big-int
+  bitwise); native backend needs g++/clang++
+- Engines: `pyhp run` (bytecode VM, `--tree` for the tree-walker) ·
+  `pyhp repl` (tree-walking interpreter) ·
   `pyhp build` / `pyhp compile` (PyHP → PHP 8 transpiler) ·
   `pyhp build --target cpp|native` (PyHP → C++17 → machine code)
 
@@ -483,20 +485,25 @@ Callables stored in a dict are also dot-callable: `ops = {"twice": lambda s: s +
 
 ## 17. Engine parity
 
-The test suite (`php tests/run_tests.php`, 43 cases) executes every program on
-both PHP engines (plus the native backend where g++ exists) and requires
-byte-identical output. The only known divergences:
+The test suite (`php tests/run_tests.php`, 46 cases) executes every program on
+tree-walking interpreter, bytecode VM and transpiler (plus the native backend
+where g++ exists) and requires byte-identical output. The only known
+divergences:
 
-| Case | Interpreter | Compiled |
+| Case | Interpreter / VM | Compiled |
 | --- | --- | --- |
 | `require()` with a computed (non-literal) spec | works | compile-time error — use a literal |
 | `catch` of a class defined in another module | matches by name | falls back to generic catch |
 
 Deliberate native-backend differences (documented, not bugs): lambdas capture
 enclosing values **by value at creation** (early binding) while the PHP
-engines bind late; `sorted(key = …, reverse = …)` is the only builtin that
-takes keyword arguments natively; user-function kwargs and classes are
-native-unsupported with clear errors.
+engines bind late; classes use a flat registry namespace (one program = one
+namespace); `range`/`map`/`filter`/`zip`/`enumerate`/`reversed` stay eager
+lists natively; big-int literals are unsupported (int64 only).
+
+Deliberate VM notes: the VM compiles functions once and reuses the tree
+walker's runtime helpers, so semantics are shared by construction; the REPL
+and `pyhp run --tree` always use the tree-walker.
 
 ## 18. C++ native blocks — `cpp { ... }`
 
@@ -556,6 +563,14 @@ cpp {
   `pyhp_list_free(&L)`; lists *passed in* stay valid for the duration of the
   call and are freed by the runtime afterwards. Works in the native backend
   and the exec helper; the FFI bridge reports that it cannot marshal structs.
+- **Dicts cross the bridge (0.7.0)**: declare a parameter or return as
+  `pyhp_dict` — `struct pyhp_dict { int64_t len; char** keys; pyhp_val* items; };`
+  with the same value kinds as lists. Keys ride as C strings; on the PyHP side
+  an all-digit key becomes an int key (the same round-trip rule as
+  `json_parse`). A dict an export *returns* must malloc `keys` and `items`
+  (and `strdup` every key and string value) — PyHP copies and then calls
+  `pyhp_dict_free(&D)`. Works in the native backend and the exec helper; the
+  FFI bridge reports that it cannot marshal structs.
 - Compilation is lazy (first call), cached in `./.pyhp_native/` (override with
   `PYHP_NATIVE_CACHE`), and needs a C++ compiler (`g++`, `clang++` or `c++`;
   override with `CXX`).
@@ -584,17 +599,28 @@ defaults, variadics), top-level function references as values (`map(len, xs)`),
 `foreach`/`while`/`do`/`for`, `try`/`catch`/`throw`, `require()` of modules and
 stdlib, `cpp { ... }` blocks, and most builtins (`print len range map filter
 sorted sum abs min max sqrt round chr ord hex bin json_parse json_string
-base64e/base64d urlenc/urldec sha256 file_read/file_write argv exit time ...`).
+base64e/base64d urlenc/urldec sha256 file_read/file_write argv exit time
+isinstance ...`).
 
 New in 0.6.0: **lambdas / anonymous function expressions compile to real C++
 closures** (free names are captured by value at creation — early binding),
 function-typed parameters are callable, and `sorted(xs, key = f, reverse =
 true)` accepts its keyword arguments (decorate-sort-undecorate, stable).
 
+New in 0.7.0: **classes** run natively — a heap-scoped model (instances are
+reference-counted objects with the same aliasing rules as lists/dicts):
+property declarations with defaults + declared-type checks on every write,
+`__construct`/`__init` with defaults and keyword arguments, inheritance with
+`super(...)` / `super.method(...)` (both accept kwargs), method overrides,
+`__str__`, `isinstance(obj, "Name")`, the `__iter__`/`__next__` iterator
+protocol, and `throw SomeError("msg")` for user classes extending an error
+class (catch matching walks the inheritance chain). Keyword arguments work on
+methods and constructors (bindings use the compile-time parameter names).
+
 Not yet in the native backend (clear compile errors — use the PHP engines):
-classes & `super`, keyword arguments on user functions, `try/finally`,
-`md5`/`crc32`, `exec`/`system`/`env`/`sleep`/`input`/`malloc_arena`,
-`isinstance` of classes.
+generators (`yield`) and lazy views, `try/finally`, `md5`/`crc32`,
+`exec`/`system`/`env`/`sleep`/`input`/`malloc_arena`, big-int values (int64
+only), `extends SomeVar` (variable-held parent classes).
 Dict keys are stored with an internal marker (int and string keys stay
 distinct); string keys beginning with `\x01` are reserved.
 
@@ -645,6 +671,126 @@ Domain walkthroughs live in [`guides/AI-DEVELOPMENT.md`](guides/AI-DEVELOPMENT.m
 
 ---
 
-*This reference describes PyHP 0.4.0. Machine-readable versions for AI
+## 21. Generators — `yield`
+
+A function whose body contains `yield` (at its own level — nested functions
+don't count) is a **generator function**: calling it returns a lazy generator
+and runs nothing until you iterate.
+
+```
+function fib() {
+    int a = 0; int b = 1;
+    while true { yield a; int t = a + b; a = b; b = t; }
+}
+first = [];
+foreach x in fib() { first.append(x); if len(first) == 10 { break; } }   // lazy, breakable
+print(first);                       // [0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+g = gen(4);
+print(type(g));                     // generator
+print(next(g), next(g));            // next() advances; StopIteration at the end
+try { next(g); } catch (StopIteration e) { print("done"); }
+print(list(gen(3)), sum(gen(4)));   // materialize / consume
+```
+
+- Works on plain functions, lambdas (`lambda x: (yield x)`), methods and
+  nested functions. Generator methods can use `this`.
+- Arguments bind eagerly at call time (arity/default/TypeError happen when
+  you call, like Python); the body runs lazily.
+- Variable semantics match the interpreter exactly: closures, module state
+  (write-through) and `this` all work across `yield` points.
+- `next(it, default)` consumes any iterator (generators, views, lists,
+  user classes with `__next__`) and raises `StopIteration` — or returns the
+  default — when exhausted.
+- Engine note: generator bodies compile to real PHP generators on both PHP
+  engines (byte-identical); the native backend reports a clear error.
+
+## 22. Lazy views — `range`, `map`, `filter`, `zip`, `enumerate`, `reversed`
+
+These builtins return **lazy views** (Python semantics) instead of lists —
+nothing is computed until you iterate, so `range(10**20)` costs nothing and
+infinite generators compose:
+
+```
+n = naturals(0);                    // infinite generator
+m = map(f, n);                      // lazy view over the generator
+taken = [];
+foreach v in m { taken.append(v); if len(taken) == 5 { break; } }
+```
+
+- Views are single-use iterators (like Python): once exhausted they stay
+  exhausted. `list(v)` / `sorted(v)` / comprehensions materialize on demand.
+- `foreach`, `for x in ...` comprehension and `next()` stream views lazily on
+  all PHP engines; `len(range(...))` is exact arithmetic (big-int capable);
+  `range` supports indexing, slicing (returns another range) and `in`
+  (computed, not scanned).
+- `repr`: `range(0, 5)`, `range(10, 0, -3)`, `<map object>`, `<filter object>`,
+  `<zip object>`, `<enumerate object>`, `<reversed object>`, and
+  `<generator object name>` — deterministic (no addresses).
+- Wrap in `list(...)` when you need a list to print or reuse.
+- Engine note: the native backend keeps these eager (returns real lists) —
+  documented divergence, tests cover it separately.
+
+## 23. Big integers — Python-style promotion
+
+Integer arithmetic never silently degrades on the PHP engines: any `+ - * **
+negation` that overflows 64-bit promotes to an exact arbitrary-precision int,
+and int literals beyond 64-bit parse exactly:
+
+```
+print(9223372036854775807 + 1);      // 9223372036854775808
+print(2 ** 100);                     // 1267650600228229401496703205376
+big = int("99999999999999999999");   // exact, never rounds
+print(hex(2 ** 80), bin(2 ** 10));
+print(f"{2 ** 80:,}");               // grouping works
+d = {2 ** 70: "big"}; print(d[2 ** 70]);
+```
+
+- Comparisons, `sum()`, `sorted()`, dict keys, `range` bounds, `enumerate`
+  starts, format specs (`d`, `b`, `o`, `x`, `X`) and `hex()`/`bin()` are all
+  exact.
+- Division `/` with big operands converts to float and raises `OverflowError`
+  past float range (like Python); `%` keeps Python's floor-mod sign rules.
+- Bitwise ops (`& | ^ ~ << >>`) on big values need the `gmp` PHP extension
+  (the bundled build ships it); without gmp they raise a clear `TypeError`
+  while arithmetic keeps working.
+- `type(2 ** 100)` is `"int"` and `isinstance(x, "int")` is true.
+- Engine note: the native backend is int64-only and rejects big literals with
+  a clear error.
+
+## 24. The bytecode VM
+
+`pyhp run` executes through a stack-based bytecode VM: programs compile to a
+flat op array (constants, loads/stores, arithmetic, comparisons, jumps,
+echo, return) and run on a dispatch loop; functions compile their bodies once
+and cache the bytecode. Complex subtrees (calls, member access, classes,
+`cpp { }` blocks) carry their AST and delegate to the shared runtime helpers,
+so VM output is byte-identical to `--tree` mode by construction.
+
+```
+pyhp run app.pyh            # VM (default)
+pyhp run app.pyh --tree     # classic tree-walking interpreter
+pyhp repl                   # tree-walker (line-by-line)
+```
+
+Use `--tree` if you ever need the exact legacy path; the test suite runs every
+case on both plus the transpiler.
+
+## 25. `pyhp langs` — the offline cross-language bridge
+
+Instead of installing PHP/Python/C++/Node to check "how do I write X here",
+the interpreter ships the mapping:
+
+```
+pyhp langs              # PyHP vs Python vs PHP (compact)
+pyhp langs python       # PyHP vs Python only
+pyhp langs full         # all five: + C++ and JavaScript
+```
+
+Same tables as [`BRIDGE.md`](BRIDGE.md) (generated from `src/langdata.php`),
+available offline with zero other runtimes installed.
+
+---
+
+*This reference describes PyHP 0.7.0. Machine-readable versions for AI
 tooling live in [`ai/pyhp-spec.json`](../ai/pyhp-spec.json) and
 [`ai/llms.txt`](../ai/llms.txt).*
